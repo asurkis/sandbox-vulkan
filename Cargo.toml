@@ -1,0 +1,8 @@
+[package]
+name = "sandbox-vulkan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ash = "0.38.0"
+sdl2 = "0.37.0"
