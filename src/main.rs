@@ -26,7 +26,8 @@ fn main() {
             .unwrap();
         let surface = vk::SurfaceKHR::from_raw(surface_raw);
 
-        let physical_device_info = pick_physical_device(&instance, &instance_ext_surface, surface);
+        let physical_device_info =
+            PhysicalDeviceInfo::new(&instance, &instance_ext_surface, surface);
         let physical_device = physical_device_info.physical_device;
 
         let (device, [queue_graphics, queue_present]) = create_device(
@@ -41,12 +42,19 @@ fn main() {
 
         window.vulkan_drawable_size();
 
-        create_swapchain(
+        let swapchain_info = SwapchainInfo::new(
+            &device,
             &device_ext_swapchain,
             surface,
             &physical_device_info,
         );
+        let swapchain_image_views =
+            create_image_views(&device, &swapchain_info.images, swapchain_info.image_format);
 
+        for view in swapchain_image_views {
+            device.destroy_image_view(view, None);
+        }
+        device_ext_swapchain.destroy_swapchain(swapchain_info.swapchain, None);
         device.destroy_device(None);
         instance_ext_surface.destroy_surface(surface, None);
         instance.destroy_instance(None);
@@ -73,29 +81,26 @@ unsafe fn create_instance(ash_entry: &ash::Entry, window: &sdl2::video::Window) 
         .as_ptr()];
 
     // For owning the null-terminated string
-    let vk_instance_extensions: Vec<_> = window
+    let instance_extensions: Vec<_> = window
         .vulkan_instance_extensions()
         .unwrap()
         .iter()
         .map(|&s| CString::new(s).unwrap())
         .collect();
-    let vk_instance_extensions_raw: Vec<_> =
-        vk_instance_extensions.iter().map(|s| s.as_ptr()).collect();
+    let instance_extensions_raw: Vec<_> = instance_extensions.iter().map(|s| s.as_ptr()).collect();
 
-    let vk_instance_create_info = vk::InstanceCreateInfo {
+    let create_info = vk::InstanceCreateInfo {
         s_type: vk::StructureType::INSTANCE_CREATE_INFO,
         p_next: ptr::null(),
         flags: vk::InstanceCreateFlags::empty(),
         p_application_info: &application_info,
         enabled_layer_count: layers_raw.len() as u32,
         pp_enabled_layer_names: layers_raw.as_ptr(),
-        enabled_extension_count: vk_instance_extensions_raw.len() as u32,
-        pp_enabled_extension_names: vk_instance_extensions_raw.as_ptr(),
+        enabled_extension_count: instance_extensions_raw.len() as u32,
+        pp_enabled_extension_names: instance_extensions_raw.as_ptr(),
         _marker: PhantomData,
     };
-    ash_entry
-        .create_instance(&vk_instance_create_info, None)
-        .unwrap()
+    ash_entry.create_instance(&create_info, None).unwrap()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -108,63 +113,65 @@ struct PhysicalDeviceInfo {
     surface_present_modes: Vec<vk::PresentModeKHR>,
 }
 
-unsafe fn pick_physical_device(
-    instance: &ash::Instance,
-    instance_ext_surface: &ash::khr::surface::Instance,
-    surface: vk::SurfaceKHR,
-) -> PhysicalDeviceInfo {
-    let physical_device_list = instance.enumerate_physical_devices().unwrap();
-    for pd in physical_device_list {
-        let mut info = PhysicalDeviceInfo::default();
-        info.physical_device = pd;
+impl PhysicalDeviceInfo {
+    unsafe fn new(
+        instance: &ash::Instance,
+        instance_ext_surface: &ash::khr::surface::Instance,
+        surface: vk::SurfaceKHR,
+    ) -> Self {
+        let physical_device_list = instance.enumerate_physical_devices().unwrap();
+        for pd in physical_device_list {
+            let mut info = Self::default();
+            info.physical_device = pd;
 
-        let mut required_extensions = HashSet::new();
-        required_extensions.insert(ash::khr::swapchain::NAME);
-        let extension_properties = instance.enumerate_device_extension_properties(pd).unwrap();
-        for ext in extension_properties {
-            required_extensions.remove(ext.extension_name_as_c_str().unwrap());
-        }
-        if !required_extensions.is_empty() {
-            continue;
-        }
-
-        let queue_family_properties = instance.get_physical_device_queue_family_properties(pd);
-        let mut has_graphics = false;
-        let mut has_present = false;
-        for i in 0..queue_family_properties.len() {
-            let prop = queue_family_properties[i];
-            if prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-                has_graphics = true;
-                info.queue_family_index_graphics = i as u32;
+            let mut required_extensions = HashSet::new();
+            required_extensions.insert(ash::khr::swapchain::NAME);
+            let extension_properties = instance.enumerate_device_extension_properties(pd).unwrap();
+            for ext in extension_properties {
+                required_extensions.remove(ext.extension_name_as_c_str().unwrap());
             }
-            if instance_ext_surface
-                .get_physical_device_surface_support(pd, i as u32, surface)
-                .unwrap()
-            {
-                has_present = true;
-                info.queue_family_index_present = i as u32;
+            if !required_extensions.is_empty() {
+                continue;
+            }
+
+            let queue_family_properties = instance.get_physical_device_queue_family_properties(pd);
+            let mut has_graphics = false;
+            let mut has_present = false;
+            for i in 0..queue_family_properties.len() {
+                let prop = queue_family_properties[i];
+                if prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                    has_graphics = true;
+                    info.queue_family_index_graphics = i as u32;
+                }
+                if instance_ext_surface
+                    .get_physical_device_surface_support(pd, i as u32, surface)
+                    .unwrap()
+                {
+                    has_present = true;
+                    info.queue_family_index_present = i as u32;
+                }
+            }
+
+            info.surface_capabilities = instance_ext_surface
+                .get_physical_device_surface_capabilities(pd, surface)
+                .unwrap();
+            info.surface_formats = instance_ext_surface
+                .get_physical_device_surface_formats(pd, surface)
+                .unwrap();
+            info.surface_present_modes = instance_ext_surface
+                .get_physical_device_surface_present_modes(pd, surface)
+                .unwrap();
+
+            if info.surface_formats.is_empty() || info.surface_present_modes.is_empty() {
+                continue;
+            }
+
+            if has_graphics && has_present {
+                return info;
             }
         }
-
-        info.surface_capabilities = instance_ext_surface
-            .get_physical_device_surface_capabilities(pd, surface)
-            .unwrap();
-        info.surface_formats = instance_ext_surface
-            .get_physical_device_surface_formats(pd, surface)
-            .unwrap();
-        info.surface_present_modes = instance_ext_surface
-            .get_physical_device_surface_present_modes(pd, surface)
-            .unwrap();
-
-        if info.surface_formats.is_empty() || info.surface_present_modes.is_empty() {
-            continue;
-        }
-
-        if has_graphics && has_present {
-            return info;
-        }
+        panic!("No fitting device found");
     }
-    panic!("No fitting device found");
 }
 
 unsafe fn create_device<const N: usize>(
@@ -212,62 +219,111 @@ unsafe fn create_device<const N: usize>(
     (device, queues)
 }
 
-unsafe fn create_swapchain(
-    device_ext_swapchain: &ash::khr::swapchain::Device,
-    surface: vk::SurfaceKHR,
-    pdi: &PhysicalDeviceInfo,
-) -> vk::SwapchainKHR {
-    let queue_family_indices = [
-        pdi.queue_family_index_graphics,
-        pdi.queue_family_index_present,
-    ];
-    let mut swapchain_create_info = vk::SwapchainCreateInfoKHR {
-        s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
-        p_next: ptr::null(),
-        flags: vk::SwapchainCreateFlagsKHR::empty(),
-        surface,
-        min_image_count: pdi.surface_capabilities.min_image_count,
-        image_format: pdi.surface_formats[0].format,
-        image_color_space: pdi.surface_formats[0].color_space,
-        image_extent: pdi.surface_capabilities.current_extent,
-        image_array_layers: 1,
-        image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-        image_sharing_mode: vk::SharingMode::CONCURRENT,
-        queue_family_index_count: 2,
-        p_queue_family_indices: queue_family_indices.as_ptr(),
-        pre_transform: pdi.surface_capabilities.current_transform,
-        composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
-        present_mode: vk::PresentModeKHR::FIFO,
-        clipped: vk::FALSE,
-        old_swapchain: vk::SwapchainKHR::null(),
-        _marker: PhantomData,
-    };
-    if pdi.surface_capabilities.max_image_count == 0
-        || pdi.surface_capabilities.min_image_count < pdi.surface_capabilities.max_image_count
-    {
-        swapchain_create_info.min_image_count += 1;
-    }
-    if pdi.queue_family_index_graphics == pdi.queue_family_index_present {
-        swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
-        swapchain_create_info.queue_family_index_count = 0;
-        swapchain_create_info.p_queue_family_indices = ptr::null();
-    }
-    for format in &pdi.surface_formats {
-        if format.format == vk::Format::B8G8R8A8_UNORM
-            && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+#[derive(Debug, Default, Clone)]
+struct SwapchainInfo {
+    swapchain: vk::SwapchainKHR,
+    image_format: vk::Format,
+    images: Vec<vk::Image>,
+}
+
+impl SwapchainInfo {
+    unsafe fn new(
+        device: &ash::Device,
+        device_ext_swapchain: &ash::khr::swapchain::Device,
+        surface: vk::SurfaceKHR,
+        pdi: &PhysicalDeviceInfo,
+    ) -> Self {
+        let queue_family_indices = [
+            pdi.queue_family_index_graphics,
+            pdi.queue_family_index_present,
+        ];
+        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR {
+            s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
+            p_next: ptr::null(),
+            flags: vk::SwapchainCreateFlagsKHR::empty(),
+            surface,
+            min_image_count: pdi.surface_capabilities.min_image_count,
+            image_format: pdi.surface_formats[0].format,
+            image_color_space: pdi.surface_formats[0].color_space,
+            image_extent: pdi.surface_capabilities.current_extent,
+            image_array_layers: 1,
+            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            image_sharing_mode: vk::SharingMode::CONCURRENT,
+            queue_family_index_count: 2,
+            p_queue_family_indices: queue_family_indices.as_ptr(),
+            pre_transform: pdi.surface_capabilities.current_transform,
+            composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+            present_mode: vk::PresentModeKHR::FIFO,
+            clipped: vk::FALSE,
+            old_swapchain: vk::SwapchainKHR::null(),
+            _marker: PhantomData,
+        };
+        if pdi.surface_capabilities.max_image_count == 0
+            || pdi.surface_capabilities.min_image_count < pdi.surface_capabilities.max_image_count
         {
-            swapchain_create_info.image_format = format.format;
-            swapchain_create_info.image_color_space = format.color_space;
-            break;
+            swapchain_create_info.min_image_count += 1;
+        }
+        if pdi.queue_family_index_graphics == pdi.queue_family_index_present {
+            swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
+            swapchain_create_info.queue_family_index_count = 0;
+            swapchain_create_info.p_queue_family_indices = ptr::null();
+        }
+        for format in &pdi.surface_formats {
+            if format.format == vk::Format::B8G8R8A8_UNORM
+                && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            {
+                swapchain_create_info.image_format = format.format;
+                swapchain_create_info.image_color_space = format.color_space;
+                break;
+            }
+        }
+        for &present_mode in &pdi.surface_present_modes {
+            if present_mode == vk::PresentModeKHR::MAILBOX {
+                swapchain_create_info.present_mode = present_mode;
+                break;
+            }
+        }
+
+        let swapchain = device_ext_swapchain
+            .create_swapchain(&swapchain_create_info, None)
+            .unwrap();
+        let images = device_ext_swapchain
+            .get_swapchain_images(swapchain)
+            .unwrap();
+        Self {
+            swapchain,
+            image_format: swapchain_create_info.image_format,
+            images,
         }
     }
-    for &present_mode in &pdi.surface_present_modes {
-        if present_mode == vk::PresentModeKHR::MAILBOX {
-            swapchain_create_info.present_mode = present_mode;
-            break;
-        }
+}
+
+unsafe fn create_image_views(
+    device: &ash::Device,
+    images: &[vk::Image],
+    format: vk::Format,
+) -> Vec<vk::ImageView> {
+    let mut views = Vec::with_capacity(images.len());
+    for &image in images {
+        let view_create_info = vk::ImageViewCreateInfo {
+            s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::ImageViewCreateFlags::empty(),
+            image,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format,
+            components: vk::ComponentMapping::default(),
+            subresource_range: vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            _marker: PhantomData,
+        };
+        let view = device.create_image_view(&view_create_info, None).unwrap();
+        views.push(view);
     }
-    device_ext_swapchain
-        .create_swapchain(&swapchain_create_info, None)
-        .unwrap()
+    views
 }
