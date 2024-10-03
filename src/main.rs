@@ -42,12 +42,8 @@ fn main() {
 
         window.vulkan_drawable_size();
 
-        let swapchain_info = SwapchainInfo::new(
-            &device,
-            &device_ext_swapchain,
-            surface,
-            &physical_device_info,
-        );
+        let swapchain_info =
+            SwapchainInfo::new(&device_ext_swapchain, surface, &physical_device_info);
         let swapchain_image_views =
             create_image_views(&device, &swapchain_info.images, swapchain_info.image_format);
 
@@ -198,7 +194,7 @@ unsafe fn create_device<const N: usize>(
         s_type: vk::StructureType::DEVICE_CREATE_INFO,
         p_next: ptr::null(),
         flags: vk::DeviceCreateFlags::empty(),
-        queue_create_info_count: 1,
+        queue_create_info_count: N as u32,
         p_queue_create_infos: device_queue_create_infos.as_ptr(),
         enabled_layer_count: 0,              // deprecated, unused
         pp_enabled_layer_names: ptr::null(), // deprecated, unused
@@ -228,7 +224,6 @@ struct SwapchainInfo {
 
 impl SwapchainInfo {
     unsafe fn new(
-        device: &ash::Device,
         device_ext_swapchain: &ash::khr::swapchain::Device,
         surface: vk::SurfaceKHR,
         pdi: &PhysicalDeviceInfo,
