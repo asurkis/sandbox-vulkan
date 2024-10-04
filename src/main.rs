@@ -1,9 +1,11 @@
 use ash::vk;
 use ash::vk::Handle;
+use sdl2::event::Event;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::ptr;
+use std::u64;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
@@ -18,6 +20,7 @@ fn main() {
             .vulkan()
             .build()
             .unwrap();
+        let mut event_pump = sdl_context.event_pump().unwrap();
 
         let ash_entry = ash::Entry::load().unwrap();
         let instance = create_instance(&ash_entry, &window);
@@ -49,8 +52,102 @@ fn main() {
             create_command_pool(&device, [physical_device_info.queue_family_index_graphics]);
         let command_buffer = create_command_buffer(&device, command_pool);
 
+        let semaphore_image_available = create_semaphore(&device);
+        let semaphore_render_finished = create_semaphore(&device);
+        let fence_command_buffer_in_flight = create_fence(&device);
 
+        'main_loop: loop {
+            for evt in event_pump.poll_iter() {
+                match evt {
+                    Event::Quit { .. }
+                    | Event::KeyDown {
+                        keycode: Some(sdl2::keyboard::Keycode::Escape),
+                        ..
+                    } => break 'main_loop,
+                    _ => {}
+                }
+            }
 
+            let fences_to_wait = [fence_command_buffer_in_flight];
+            device
+                .wait_for_fences(&fences_to_wait, true, u64::MAX)
+                .unwrap();
+            device.reset_fences(&fences_to_wait).unwrap();
+            let (image_index, suboptimal) = device_ext_swapchain
+                .acquire_next_image(
+                    swapchain_info.swapchain,
+                    u64::MAX,
+                    semaphore_image_available,
+                    vk::Fence::null(),
+                )
+                .unwrap();
+            assert!(!suboptimal);
+
+            device
+                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+            let begin_info = vk::CommandBufferBeginInfo::default();
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .unwrap();
+            let clear_values = [vk::ClearValue::default()];
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass)
+                .framebuffer(framebuffers[image_index as usize])
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: 1280,
+                        height: 720,
+                    },
+                })
+                .clear_values(&clear_values);
+            device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
+            );
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline_info.pipeline,
+            );
+            device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            device.cmd_end_render_pass(command_buffer);
+            device.end_command_buffer(command_buffer).unwrap();
+
+            let wait_semaphores = [semaphore_image_available];
+            let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let command_buffers = [command_buffer];
+            let signal_semaphores = [semaphore_render_finished];
+            let submit_info = [vk::SubmitInfo::default()
+                .wait_semaphores(&wait_semaphores)
+                .wait_dst_stage_mask(&wait_stages)
+                .command_buffers(&command_buffers)
+                .signal_semaphores(&signal_semaphores)];
+            device
+                .queue_submit(queue_graphics, &submit_info, fence_command_buffer_in_flight)
+                .unwrap();
+
+            let swapchains = [swapchain_info.swapchain];
+            let image_indices = [image_index];
+            let present_info = vk::PresentInfoKHR::default()
+                .wait_semaphores(&signal_semaphores)
+                .swapchains(&swapchains)
+                .image_indices(&image_indices);
+            device_ext_swapchain
+                .queue_present(queue_present, &present_info)
+                .unwrap();
+        }
+
+        let fences_to_wait = [fence_command_buffer_in_flight];
+        device
+            .wait_for_fences(&fences_to_wait, true, u64::MAX)
+            .unwrap();
+
+        device.destroy_fence(fence_command_buffer_in_flight, None);
+        device.destroy_semaphore(semaphore_image_available, None);
+        device.destroy_semaphore(semaphore_render_finished, None);
         device.destroy_command_pool(command_pool, None);
         for framebuffer in framebuffers {
             device.destroy_framebuffer(framebuffer, None);
@@ -306,7 +403,15 @@ unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::Re
     let subpasses = [vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_attachments)];
-    let dependencies = [];
+    let dependencies = [vk::SubpassDependency {
+        src_subpass: vk::SUBPASS_EXTERNAL,
+        dst_subpass: 0,
+        src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        src_access_mask: vk::AccessFlags::empty(),
+        dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        dependency_flags: vk::DependencyFlags::empty(),
+    }];
     let create_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(&subpasses)
@@ -378,9 +483,9 @@ impl PipelineInfo {
         }];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state_create_info =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        // let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        // let dynamic_state_create_info =
+        //     vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let layout_create_info = vk::PipelineLayoutCreateInfo::default();
         let layout = device
@@ -469,4 +574,14 @@ unsafe fn create_command_buffer(
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
     device.allocate_command_buffers(&allocate_info).unwrap()[0]
+}
+
+unsafe fn create_semaphore(device: &ash::Device) -> vk::Semaphore {
+    let create_info = vk::SemaphoreCreateInfo::default();
+    device.create_semaphore(&create_info, None).unwrap()
+}
+
+unsafe fn create_fence(device: &ash::Device) -> vk::Fence {
+    let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+    device.create_fence(&create_info, None).unwrap()
 }
