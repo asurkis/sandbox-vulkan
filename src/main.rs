@@ -3,7 +3,6 @@ use ash::vk::Handle;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ffi::CString;
-use std::marker::PhantomData;
 use std::ptr;
 
 fn main() {
@@ -40,8 +39,6 @@ fn main() {
         );
         let device_ext_swapchain = ash::khr::swapchain::Device::new(&instance, &device);
 
-        window.vulkan_drawable_size();
-
         let swapchain_info =
             SwapchainInfo::new(&device_ext_swapchain, surface, &physical_device_info);
         let swapchain_image_views =
@@ -58,20 +55,12 @@ fn main() {
 }
 
 unsafe fn create_instance(ash_entry: &ash::Entry, window: &sdl2::video::Window) -> ash::Instance {
-    let application_info = vk::ApplicationInfo {
-        s_type: vk::StructureType::APPLICATION_INFO,
-        p_next: ptr::null(),
-        p_application_name: CStr::from_bytes_with_nul(b"Sandbox App\0")
-            .unwrap()
-            .as_ptr(),
-        application_version: 0x00000001,
-        p_engine_name: CStr::from_bytes_with_nul(b"Sandbox Engine\0")
-            .unwrap()
-            .as_ptr(),
-        engine_version: 0x00000001,
-        api_version: vk::API_VERSION_1_1,
-        _marker: PhantomData,
-    };
+    let application_info = vk::ApplicationInfo::default()
+        .application_name(CStr::from_bytes_with_nul(b"Sandbox App\0").unwrap())
+        .application_version(0x0000_0001)
+        .engine_name(CStr::from_bytes_with_nul(b"Sandbox Engine\0").unwrap())
+        .engine_version(0x0000_0001)
+        .api_version(vk::API_VERSION_1_1);
     let layers_raw = [CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0")
         .unwrap()
         .as_ptr()];
@@ -85,17 +74,10 @@ unsafe fn create_instance(ash_entry: &ash::Entry, window: &sdl2::video::Window) 
         .collect();
     let instance_extensions_raw: Vec<_> = instance_extensions.iter().map(|s| s.as_ptr()).collect();
 
-    let create_info = vk::InstanceCreateInfo {
-        s_type: vk::StructureType::INSTANCE_CREATE_INFO,
-        p_next: ptr::null(),
-        flags: vk::InstanceCreateFlags::empty(),
-        p_application_info: &application_info,
-        enabled_layer_count: layers_raw.len() as u32,
-        pp_enabled_layer_names: layers_raw.as_ptr(),
-        enabled_extension_count: instance_extensions_raw.len() as u32,
-        pp_enabled_extension_names: instance_extensions_raw.as_ptr(),
-        _marker: PhantomData,
-    };
+    let create_info = vk::InstanceCreateInfo::default()
+        .application_info(&application_info)
+        .enabled_layer_names(&layers_raw)
+        .enabled_extension_names(&instance_extensions_raw);
     ash_entry.create_instance(&create_info, None).unwrap()
 }
 
@@ -178,40 +160,21 @@ unsafe fn create_device<const N: usize>(
     let queue_priority = [1.0];
     let mut device_queue_create_infos = [vk::DeviceQueueCreateInfo::default(); N];
     for i in 0..N {
-        device_queue_create_infos[i] = vk::DeviceQueueCreateInfo {
-            s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::DeviceQueueCreateFlags::empty(),
-            queue_family_index: queue_family_indices[i],
-            queue_count: 1,
-            p_queue_priorities: queue_priority.as_ptr(),
-            _marker: PhantomData,
-        };
+        device_queue_create_infos[i] = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(queue_family_indices[i])
+            .queue_priorities(&queue_priority);
     }
     let device_extensions_raw = [ash::khr::swapchain::NAME.as_ptr()];
-    #[allow(deprecated)]
-    let device_create_info = vk::DeviceCreateInfo {
-        s_type: vk::StructureType::DEVICE_CREATE_INFO,
-        p_next: ptr::null(),
-        flags: vk::DeviceCreateFlags::empty(),
-        queue_create_info_count: N as u32,
-        p_queue_create_infos: device_queue_create_infos.as_ptr(),
-        enabled_layer_count: 0,              // deprecated, unused
-        pp_enabled_layer_names: ptr::null(), // deprecated, unused
-        enabled_extension_count: device_extensions_raw.len() as u32,
-        pp_enabled_extension_names: device_extensions_raw.as_ptr(),
-        p_enabled_features: ptr::null(),
-        _marker: PhantomData,
-    };
+    let device_create_info = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&device_queue_create_infos)
+        .enabled_extension_names(&device_extensions_raw);
     let device = instance
         .create_device(physical_device, &device_create_info, None)
         .unwrap();
-
     let mut queues = [vk::Queue::default(); N];
     for i in 0..N {
         queues[i] = device.get_device_queue(queue_family_indices[i], 0);
     }
-
     (device, queues)
 }
 
@@ -232,27 +195,20 @@ impl SwapchainInfo {
             pdi.queue_family_index_graphics,
             pdi.queue_family_index_present,
         ];
-        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR {
-            s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
-            p_next: ptr::null(),
-            flags: vk::SwapchainCreateFlagsKHR::empty(),
-            surface,
-            min_image_count: pdi.surface_capabilities.min_image_count,
-            image_format: pdi.surface_formats[0].format,
-            image_color_space: pdi.surface_formats[0].color_space,
-            image_extent: pdi.surface_capabilities.current_extent,
-            image_array_layers: 1,
-            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            image_sharing_mode: vk::SharingMode::CONCURRENT,
-            queue_family_index_count: 2,
-            p_queue_family_indices: queue_family_indices.as_ptr(),
-            pre_transform: pdi.surface_capabilities.current_transform,
-            composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
-            present_mode: vk::PresentModeKHR::FIFO,
-            clipped: vk::FALSE,
-            old_swapchain: vk::SwapchainKHR::null(),
-            _marker: PhantomData,
-        };
+        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+            .surface(surface)
+            .min_image_count(pdi.surface_capabilities.min_image_count)
+            .image_format(pdi.surface_formats[0].format)
+            .image_color_space(pdi.surface_formats[0].color_space)
+            .image_extent(pdi.surface_capabilities.current_extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(&queue_family_indices)
+            .pre_transform(pdi.surface_capabilities.current_transform)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(vk::PresentModeKHR::FIFO)
+            .clipped(false);
         if pdi.surface_capabilities.max_image_count == 0
             || pdi.surface_capabilities.min_image_count < pdi.surface_capabilities.max_image_count
         {
@@ -300,23 +256,17 @@ unsafe fn create_image_views(
 ) -> Vec<vk::ImageView> {
     let mut views = Vec::with_capacity(images.len());
     for &image in images {
-        let view_create_info = vk::ImageViewCreateInfo {
-            s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageViewCreateFlags::empty(),
-            image,
-            view_type: vk::ImageViewType::TYPE_2D,
-            format,
-            components: vk::ComponentMapping::default(),
-            subresource_range: vk::ImageSubresourceRange {
+        let view_create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
                 layer_count: 1,
-            },
-            _marker: PhantomData,
-        };
+            });
         let view = device.create_image_view(&view_create_info, None).unwrap();
         views.push(view);
     }
