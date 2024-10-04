@@ -9,6 +9,7 @@ use std::u64;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
+const MAX_CONCURRENT_FRAMES: usize = 2;
 
 fn main() {
     unsafe {
@@ -50,11 +51,17 @@ fn main() {
         let framebuffers = create_framebuffers(&device, &swapchain_image_views, render_pass);
         let [command_pool] =
             create_command_pool(&device, [physical_device_info.queue_family_index_graphics]);
-        let command_buffer = create_command_buffer(&device, command_pool);
 
-        let semaphore_image_available = create_semaphore(&device);
-        let semaphore_render_finished = create_semaphore(&device);
-        let fence_command_buffer_in_flight = create_fence(&device);
+        let command_buffers = create_command_buffers(&device, command_pool);
+        let mut semaphores_image_available = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
+        let mut semaphores_render_finished = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
+        let mut fences_in_flight = [vk::Fence::null(); MAX_CONCURRENT_FRAMES];
+        for i in 0..MAX_CONCURRENT_FRAMES {
+            semaphores_image_available[i] = create_semaphore(&device);
+            semaphores_render_finished[i] = create_semaphore(&device);
+            fences_in_flight[i] = create_fence(&device);
+        }
+        let mut command_buffer_index = 0;
 
         'main_loop: loop {
             for evt in event_pump.poll_iter() {
@@ -68,27 +75,29 @@ fn main() {
                 }
             }
 
-            let fences_to_wait = [fence_command_buffer_in_flight];
-            device
-                .wait_for_fences(&fences_to_wait, true, u64::MAX)
-                .unwrap();
-            device.reset_fences(&fences_to_wait).unwrap();
+            let cur_command_buffer = command_buffers[command_buffer_index];
+            let cur_fence = [fences_in_flight[command_buffer_index]];
+            let cur_image_available = [semaphores_image_available[command_buffer_index]];
+            let cur_render_finished = [semaphores_render_finished[command_buffer_index]];
+
+            device.wait_for_fences(&cur_fence, true, u64::MAX).unwrap();
+            device.reset_fences(&cur_fence).unwrap();
             let (image_index, suboptimal) = device_ext_swapchain
                 .acquire_next_image(
                     swapchain_info.swapchain,
                     u64::MAX,
-                    semaphore_image_available,
+                    cur_image_available[0],
                     vk::Fence::null(),
                 )
                 .unwrap();
             assert!(!suboptimal);
 
             device
-                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+                .reset_command_buffer(cur_command_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
             let begin_info = vk::CommandBufferBeginInfo::default();
             device
-                .begin_command_buffer(command_buffer, &begin_info)
+                .begin_command_buffer(cur_command_buffer, &begin_info)
                 .unwrap();
             let clear_values = [vk::ClearValue::default()];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
@@ -103,48 +112,50 @@ fn main() {
                 })
                 .clear_values(&clear_values);
             device.cmd_begin_render_pass(
-                command_buffer,
+                cur_command_buffer,
                 &render_pass_begin,
                 vk::SubpassContents::INLINE,
             );
             device.cmd_bind_pipeline(
-                command_buffer,
+                cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline_info.pipeline,
             );
-            device.cmd_draw(command_buffer, 3, 1, 0, 0);
-            device.cmd_end_render_pass(command_buffer);
-            device.end_command_buffer(command_buffer).unwrap();
+            device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
+            device.cmd_end_render_pass(cur_command_buffer);
+            device.end_command_buffer(cur_command_buffer).unwrap();
 
-            let wait_semaphores = [semaphore_image_available];
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let command_buffers = [command_buffer];
-            let signal_semaphores = [semaphore_render_finished];
+            let command_buffers = [cur_command_buffer];
             let submit_info = [vk::SubmitInfo::default()
-                .wait_semaphores(&wait_semaphores)
+                .wait_semaphores(&cur_image_available)
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&command_buffers)
-                .signal_semaphores(&signal_semaphores)];
+                .signal_semaphores(&cur_render_finished)];
             device
-                .queue_submit(queue_graphics, &submit_info, fence_command_buffer_in_flight)
+                .queue_submit(queue_graphics, &submit_info, cur_fence[0])
                 .unwrap();
 
             let swapchains = [swapchain_info.swapchain];
             let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&signal_semaphores)
+                .wait_semaphores(&cur_render_finished)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
             device_ext_swapchain
                 .queue_present(queue_present, &present_info)
                 .unwrap();
+
+            command_buffer_index = (command_buffer_index + 1) % MAX_CONCURRENT_FRAMES;
         }
 
         device.device_wait_idle().unwrap();
 
-        device.destroy_fence(fence_command_buffer_in_flight, None);
-        device.destroy_semaphore(semaphore_image_available, None);
-        device.destroy_semaphore(semaphore_render_finished, None);
+        for i in 0..MAX_CONCURRENT_FRAMES {
+            device.destroy_fence(fences_in_flight[i], None);
+            device.destroy_semaphore(semaphores_image_available[i], None);
+            device.destroy_semaphore(semaphores_render_finished[i], None);
+        }
         device.destroy_command_pool(command_pool, None);
         for framebuffer in framebuffers {
             device.destroy_framebuffer(framebuffer, None);
@@ -562,15 +573,15 @@ unsafe fn create_command_pool<const N: usize>(
     command_pools
 }
 
-unsafe fn create_command_buffer(
+unsafe fn create_command_buffers(
     device: &ash::Device,
     command_pool: vk::CommandPool,
-) -> vk::CommandBuffer {
+) -> Vec<vk::CommandBuffer> {
     let allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-    device.allocate_command_buffers(&allocate_info).unwrap()[0]
+        .command_buffer_count(MAX_CONCURRENT_FRAMES as u32);
+    device.allocate_command_buffers(&allocate_info).unwrap()
 }
 
 unsafe fn create_semaphore(device: &ash::Device) -> vk::Semaphore {
