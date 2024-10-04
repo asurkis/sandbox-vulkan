@@ -140,10 +140,7 @@ fn main() {
                 .unwrap();
         }
 
-        let fences_to_wait = [fence_command_buffer_in_flight];
-        device
-            .wait_for_fences(&fences_to_wait, true, u64::MAX)
-            .unwrap();
+        device.device_wait_idle().unwrap();
 
         device.destroy_fence(fence_command_buffer_in_flight, None);
         device.destroy_semaphore(semaphore_image_available, None);
