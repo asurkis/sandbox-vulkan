@@ -22,16 +22,13 @@ fn main() {
         let ash_entry = ash::Entry::load().unwrap();
         let instance = create_instance(&ash_entry, &window);
         let instance_ext_surface = ash::khr::surface::Instance::new(&ash_entry, &instance);
-
         let surface_raw = window
             .vulkan_create_surface(instance.handle().as_raw() as usize)
             .unwrap();
         let surface = vk::SurfaceKHR::from_raw(surface_raw);
-
         let physical_device_info =
             PhysicalDeviceInfo::new(&instance, &instance_ext_surface, surface);
         let physical_device = physical_device_info.physical_device;
-
         let (device, [queue_graphics, queue_present]) = create_device(
             &instance,
             physical_device,
@@ -41,15 +38,23 @@ fn main() {
             ],
         );
         let device_ext_swapchain = ash::khr::swapchain::Device::new(&instance, &device);
-
         let swapchain_info =
             SwapchainInfo::new(&device_ext_swapchain, surface, &physical_device_info);
         let swapchain_image_views =
             create_image_views(&device, &swapchain_info.images, swapchain_info.image_format);
-
         let render_pass = create_render_pass(&device, swapchain_info.image_format);
         let pipeline_info = PipelineInfo::new(&device, render_pass);
+        let framebuffers = create_framebuffers(&device, &swapchain_image_views, render_pass);
+        let [command_pool] =
+            create_command_pool(&device, [physical_device_info.queue_family_index_graphics]);
+        let command_buffer = create_command_buffer(&device, command_pool);
 
+
+
+        device.destroy_command_pool(command_pool, None);
+        for framebuffer in framebuffers {
+            device.destroy_framebuffer(framebuffer, None);
+        }
         device.destroy_pipeline(pipeline_info.pipeline, None);
         device.destroy_pipeline_layout(pipeline_info.layout, None);
         device.destroy_render_pass(render_pass, None);
@@ -418,4 +423,50 @@ unsafe fn create_shader_module(device: &ash::Device, bytecode: &[u8]) -> vk::Sha
     }
     let create_info = vk::ShaderModuleCreateInfo::default().code(&code_safe);
     device.create_shader_module(&create_info, None).unwrap()
+}
+
+unsafe fn create_framebuffers(
+    device: &ash::Device,
+    image_views: &[vk::ImageView],
+    render_pass: vk::RenderPass,
+) -> Vec<vk::Framebuffer> {
+    let n = image_views.len();
+    let mut framebuffers = Vec::with_capacity(n);
+    for &iv in image_views {
+        let attachments = [iv];
+        let create_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&attachments)
+            .width(1280)
+            .height(720)
+            .layers(1);
+        let framebuffer = device.create_framebuffer(&create_info, None).unwrap();
+        framebuffers.push(framebuffer);
+    }
+    framebuffers
+}
+
+unsafe fn create_command_pool<const N: usize>(
+    device: &ash::Device,
+    queue_family_indices: [u32; N],
+) -> [vk::CommandPool; N] {
+    let mut command_pools = [vk::CommandPool::null(); N];
+    for i in 0..N {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(queue_family_indices[i]);
+        command_pools[i] = device.create_command_pool(&create_info, None).unwrap();
+    }
+    command_pools
+}
+
+unsafe fn create_command_buffer(
+    device: &ash::Device,
+    command_pool: vk::CommandPool,
+) -> vk::CommandBuffer {
+    let allocate_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+    device.allocate_command_buffers(&allocate_info).unwrap()[0]
 }
