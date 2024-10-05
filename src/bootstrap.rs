@@ -5,14 +5,11 @@ use std::ffi::CStr;
 use std::ffi::CString;
 
 pub struct SdlBox {
-    pub system: sdl2::Sdl,
     pub event_pump: sdl2::EventPump,
-    pub video: sdl2::VideoSubsystem,
     pub window: sdl2::video::Window,
 }
 
 pub struct VkBox {
-    pub ash_entry: ash::Entry,
     pub instance: ash::Instance,
     pub instance_ext_surface: ash::khr::surface::Instance,
     pub physical_device_info: PhysicalDeviceInfo,
@@ -44,12 +41,7 @@ impl SdlBox {
             .vulkan()
             .build()
             .unwrap();
-        Self {
-            system,
-            video,
-            window,
-            event_pump,
-        }
+        Self { window, event_pump }
     }
 }
 
@@ -75,7 +67,6 @@ impl VkBox {
         );
         let device_ext_swapchain = ash::khr::swapchain::Device::new(&instance, &device);
         Self {
-            ash_entry,
             instance,
             instance_ext_surface,
             physical_device_info,
@@ -148,7 +139,8 @@ impl Drop for VkBox {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_device(None);
-            self.instance_ext_surface.destroy_surface(self.physical_device_info.surface, None);
+            self.instance_ext_surface
+                .destroy_surface(self.physical_device_info.surface, None);
             self.instance.destroy_instance(None);
         }
     }
