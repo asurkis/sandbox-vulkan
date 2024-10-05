@@ -3,6 +3,7 @@ use ash::vk::Handle;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ptr;
 
 pub struct SdlBox {
     pub event_pump: sdl2::EventPump,
@@ -23,6 +24,7 @@ pub struct VkBox {
 pub struct PhysicalDeviceInfo {
     pub surface: vk::SurfaceKHR,
     pub physical_device: vk::PhysicalDevice,
+    pub queue_family_indices: [u32; 2],
     pub queue_family_index_graphics: u32,
     pub queue_family_index_present: u32,
     pub surface_capabilities: vk::SurfaceCapabilitiesKHR,
@@ -186,6 +188,11 @@ impl PhysicalDeviceInfo {
                 }
             }
 
+            info.queue_family_indices = [
+                info.queue_family_index_graphics,
+                info.queue_family_index_present,
+            ];
+
             info.surface_capabilities = instance_ext_surface
                 .get_physical_device_surface_capabilities(pd, surface)
                 .unwrap();
@@ -205,5 +212,48 @@ impl PhysicalDeviceInfo {
             }
         }
         panic!("No fitting device found");
+    }
+
+    pub fn swapchain_create_info(&self) -> vk::SwapchainCreateInfoKHR {
+        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+            .surface(self.surface)
+            .min_image_count(self.surface_capabilities.min_image_count)
+            .image_format(self.surface_formats[0].format)
+            .image_color_space(self.surface_formats[0].color_space)
+            .image_extent(self.surface_capabilities.current_extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(&self.queue_family_indices)
+            .pre_transform(self.surface_capabilities.current_transform)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(vk::PresentModeKHR::FIFO)
+            .clipped(false);
+        if self.surface_capabilities.max_image_count == 0
+            || self.surface_capabilities.min_image_count < self.surface_capabilities.max_image_count
+        {
+            swapchain_create_info.min_image_count += 1;
+        }
+        if self.queue_family_index_graphics == self.queue_family_index_present {
+            swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
+            swapchain_create_info.queue_family_index_count = 0;
+            swapchain_create_info.p_queue_family_indices = ptr::null();
+        }
+        for format in &self.surface_formats {
+            if format.format == vk::Format::B8G8R8A8_UNORM
+                && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            {
+                swapchain_create_info.image_format = format.format;
+                swapchain_create_info.image_color_space = format.color_space;
+                break;
+            }
+        }
+        for &present_mode in &self.surface_present_modes {
+            if present_mode == vk::PresentModeKHR::MAILBOX {
+                swapchain_create_info.present_mode = present_mode;
+                break;
+            }
+        }
+        swapchain_create_info
     }
 }

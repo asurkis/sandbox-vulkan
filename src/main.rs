@@ -6,6 +6,7 @@ use bootstrap::SdlBox;
 use bootstrap::VkBox;
 use sdl2::event::Event;
 use std::ffi::CStr;
+use std::marker::PhantomData;
 use std::ptr;
 use std::u64;
 
@@ -18,15 +19,10 @@ fn main() {
         let mut sdl = SdlBox::new();
         let vk = VkBox::new(&sdl);
 
-        let swapchain_info = SwapchainInfo::new(&vk.device_ext_swapchain, &vk.physical_device_info);
-        let swapchain_image_views = create_image_views(
-            &vk.device,
-            &swapchain_info.images,
-            swapchain_info.image_format,
-        );
-        let render_pass = create_render_pass(&vk.device, swapchain_info.image_format);
+        let swapchain_create_info = vk.physical_device_info.swapchain_create_info();
+        let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
+        let swapchain_st = SwapchainState::new(&vk, render_pass);
         let pipeline_info = PipelineInfo::new(&vk.device, render_pass);
-        let framebuffers = create_framebuffers(&vk.device, &swapchain_image_views, render_pass);
         let [command_pool] = create_command_pool(
             &vk.device,
             [vk.physical_device_info.queue_family_index_graphics],
@@ -67,7 +63,7 @@ fn main() {
             let (image_index, suboptimal) = vk
                 .device_ext_swapchain
                 .acquire_next_image(
-                    swapchain_info.swapchain,
+                    swapchain_st.swapchain,
                     u64::MAX,
                     cur_image_available[0],
                     vk::Fence::null(),
@@ -85,7 +81,7 @@ fn main() {
             let clear_values = [vk::ClearValue::default()];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass)
-                .framebuffer(framebuffers[image_index as usize])
+                .framebuffer(swapchain_st.framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: vk::Extent2D {
@@ -119,7 +115,7 @@ fn main() {
                 .queue_submit(vk.queue_graphics, &submit_info, cur_fence[0])
                 .unwrap();
 
-            let swapchains = [swapchain_info.swapchain];
+            let swapchains = [swapchain_st.swapchain];
             let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
                 .wait_semaphores(&cur_render_finished)
@@ -142,88 +138,61 @@ fn main() {
                 .destroy_semaphore(semaphores_render_finished[i], None);
         }
         vk.device.destroy_command_pool(command_pool, None);
-        for framebuffer in framebuffers {
-            vk.device.destroy_framebuffer(framebuffer, None);
-        }
         vk.device.destroy_pipeline(pipeline_info.pipeline, None);
         vk.device
             .destroy_pipeline_layout(pipeline_info.layout, None);
+        swapchain_st.destroy(&vk);
         vk.device.destroy_render_pass(render_pass, None);
-        for view in swapchain_image_views {
-            vk.device.destroy_image_view(view, None);
-        }
-        vk.device_ext_swapchain
-            .destroy_swapchain(swapchain_info.swapchain, None);
     }
 }
 
 #[derive(Debug, Default, Clone)]
-struct SwapchainInfo {
+struct SwapchainState {
+    create_info: vk::SwapchainCreateInfoKHR<'static>,
     swapchain: vk::SwapchainKHR,
-    image_format: vk::Format,
     images: Vec<vk::Image>,
+    image_views: Vec<vk::ImageView>,
+    framebuffers: Vec<vk::Framebuffer>,
 }
 
-impl SwapchainInfo {
-    unsafe fn new(
-        device_ext_swapchain: &ash::khr::swapchain::Device,
-        pdi: &PhysicalDeviceInfo,
-    ) -> Self {
-        let queue_family_indices = [
-            pdi.queue_family_index_graphics,
-            pdi.queue_family_index_present,
-        ];
-        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(pdi.surface)
-            .min_image_count(pdi.surface_capabilities.min_image_count)
-            .image_format(pdi.surface_formats[0].format)
-            .image_color_space(pdi.surface_formats[0].color_space)
-            .image_extent(pdi.surface_capabilities.current_extent)
-            .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(vk::SharingMode::CONCURRENT)
-            .queue_family_indices(&queue_family_indices)
-            .pre_transform(pdi.surface_capabilities.current_transform)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
-            .clipped(false);
-        if pdi.surface_capabilities.max_image_count == 0
-            || pdi.surface_capabilities.min_image_count < pdi.surface_capabilities.max_image_count
-        {
-            swapchain_create_info.min_image_count += 1;
-        }
-        if pdi.queue_family_index_graphics == pdi.queue_family_index_present {
-            swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
-            swapchain_create_info.queue_family_index_count = 0;
-            swapchain_create_info.p_queue_family_indices = ptr::null();
-        }
-        for format in &pdi.surface_formats {
-            if format.format == vk::Format::B8G8R8A8_UNORM
-                && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            {
-                swapchain_create_info.image_format = format.format;
-                swapchain_create_info.image_color_space = format.color_space;
-                break;
-            }
-        }
-        for &present_mode in &pdi.surface_present_modes {
-            if present_mode == vk::PresentModeKHR::MAILBOX {
-                swapchain_create_info.present_mode = present_mode;
-                break;
-            }
-        }
-
-        let swapchain = device_ext_swapchain
-            .create_swapchain(&swapchain_create_info, None)
+impl SwapchainState {
+    unsafe fn new(vk: &VkBox, render_pass: vk::RenderPass) -> Self {
+        let create_info = vk.physical_device_info.swapchain_create_info();
+        let saved_create_info = vk::SwapchainCreateInfoKHR {
+            queue_family_index_count: 0,
+            p_queue_family_indices: ptr::null(),
+            _marker: PhantomData,
+            ..create_info
+        };
+        let swapchain = vk
+            .device_ext_swapchain
+            .create_swapchain(&create_info, None)
             .unwrap();
-        let images = device_ext_swapchain
+        let images = vk
+            .device_ext_swapchain
             .get_swapchain_images(swapchain)
             .unwrap();
+        let image_views = create_image_views(&vk.device, &images, create_info.image_format);
+        let framebuffers = create_framebuffers(&vk.device, &image_views, render_pass);
         Self {
+            create_info: saved_create_info,
             swapchain,
-            image_format: swapchain_create_info.image_format,
             images,
+            image_views,
+            framebuffers,
         }
+    }
+
+    unsafe fn destroy(self, vk: &VkBox) {
+        for framebuffer in self.framebuffers {
+            vk.device.destroy_framebuffer(framebuffer, None);
+        }
+        for image_view in self.image_views {
+            vk.device.destroy_image_view(image_view, None);
+        }
+        // Images are owned by swapchain
+        vk.device_ext_swapchain
+            .destroy_swapchain(self.swapchain, None);
     }
 }
 
