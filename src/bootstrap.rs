@@ -133,6 +133,22 @@ impl VkBox {
         }
         (device, queues)
     }
+
+    pub unsafe fn create_shader_module(&self, bytecode: &[u8]) -> vk::ShaderModule {
+        let mut code_safe = Vec::with_capacity((bytecode.len() + 3) / 4);
+        for i in (0..bytecode.len()).step_by(4) {
+            let mut arr = [0; 4];
+            for j in i..bytecode.len().min(i + 4) {
+                arr[j - i] = bytecode[j];
+            }
+            let u = u32::from_ne_bytes(arr);
+            code_safe.push(u);
+        }
+        let create_info = vk::ShaderModuleCreateInfo::default().code(&code_safe);
+        self.device
+            .create_shader_module(&create_info, None)
+            .unwrap()
+    }
 }
 
 impl Drop for VkBox {

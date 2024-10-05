@@ -15,15 +15,9 @@ const MAX_CONCURRENT_FRAMES: usize = 2;
 
 fn main() {
     unsafe {
-        let mut sdl = SdlBox::new();
-        let vk = VkBox::new(&sdl);
+        let mut app = App::new();
+        app.init();
 
-        let swapchain_info = SwapchainInfo::new(&vk.device_ext_swapchain, &vk.physical_device_info);
-        let swapchain_image_views = create_image_views(
-            &vk.device,
-            &swapchain_info.images,
-            swapchain_info.image_format,
-        );
         let render_pass = create_render_pass(&vk.device, swapchain_info.image_format);
         let pipeline_info = PipelineInfo::new(&vk.device, render_pass);
         let framebuffers = create_framebuffers(&vk.device, &swapchain_image_views, render_pass);
@@ -157,18 +151,43 @@ fn main() {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct SwapchainInfo {
-    swapchain: vk::SwapchainKHR,
-    image_format: vk::Format,
-    images: Vec<vk::Image>,
+struct App {
+    st: AppState,
+    // Order of dropping is important
+    vk: VkBox,
+    sdl: SdlBox,
 }
 
-impl SwapchainInfo {
-    unsafe fn new(
-        device_ext_swapchain: &ash::khr::swapchain::Device,
-        pdi: &PhysicalDeviceInfo,
-    ) -> Self {
+#[derive(Debug, Default, Clone)]
+struct AppState {
+    // State is nullable and has defaults, even for handles
+    // However, surface is in VkBox as it's used in Device initialization
+    swapchain: vk::SwapchainKHR,
+    swapchain_image_format: vk::Format,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
+    framebuffers: Vec<vk::Framebuffer>,
+
+    render_pass: vk::RenderPass,
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+}
+
+impl App {
+    unsafe fn new() -> Self {
+        let sdl = SdlBox::new();
+        let vk = VkBox::new(&sdl);
+        let st = AppState::default();
+        Self { st, vk, sdl }
+    }
+
+    unsafe fn init(&mut self) {
+        self.init_swapchain();
+        self.init_render_pass();
+    }
+
+    unsafe fn init_swapchain(&mut self) {
+        let pdi = &self.vk.physical_device_info;
         let queue_family_indices = [
             pdi.queue_family_index_graphics,
             pdi.queue_family_index_present,
@@ -213,89 +232,95 @@ impl SwapchainInfo {
             }
         }
 
-        let swapchain = device_ext_swapchain
+        self.st.swapchain_image_format = swapchain_create_info.image_format;
+        self.st.swapchain = self
+            .vk
+            .device_ext_swapchain
             .create_swapchain(&swapchain_create_info, None)
             .unwrap();
-        let images = device_ext_swapchain
-            .get_swapchain_images(swapchain)
+        self.st.swapchain_images = self
+            .vk
+            .device_ext_swapchain
+            .get_swapchain_images(self.st.swapchain)
             .unwrap();
-        Self {
-            swapchain,
-            image_format: swapchain_create_info.image_format,
-            images,
+        self.st.swapchain_image_views.clear();
+        self.st
+            .swapchain_image_views
+            .reserve(self.st.swapchain_images.len());
+        for &image in &self.st.swapchain_images {
+            let view_create_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(swapchain_create_info.image_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let view = self
+                .vk
+                .device
+                .create_image_view(&view_create_info, None)
+                .unwrap();
+            self.st.swapchain_image_views.push(view);
         }
     }
-}
 
-unsafe fn create_image_views(
-    device: &ash::Device,
-    images: &[vk::Image],
-    format: vk::Format,
-) -> Vec<vk::ImageView> {
-    let mut views = Vec::with_capacity(images.len());
-    for &image in images {
-        let view_create_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-        let view = device.create_image_view(&view_create_info, None).unwrap();
-        views.push(view);
+    unsafe fn deinit_swapchain(&mut self) {
+        for view in std::mem::take(&mut self.st.swapchain_image_views) {
+            self.vk.device.destroy_image_view(view, None);
+        }
+        // Images are owned by the swapchain
+        self.st.swapchain_images.clear();
+        self.vk
+            .device_ext_swapchain
+            .destroy_swapchain(self.st.swapchain, None);
     }
-    views
-}
 
-unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::RenderPass {
-    let attachments = [vk::AttachmentDescription {
-        flags: vk::AttachmentDescriptionFlags::empty(),
-        format,
-        samples: vk::SampleCountFlags::TYPE_1,
-        load_op: vk::AttachmentLoadOp::CLEAR,
-        store_op: vk::AttachmentStoreOp::STORE,
-        stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-        stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-        initial_layout: vk::ImageLayout::UNDEFINED,
-        final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-    }];
-    let color_attachments = [vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-    }];
-    let subpasses = [vk::SubpassDescription::default()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_attachments)];
-    let dependencies = [vk::SubpassDependency {
-        src_subpass: vk::SUBPASS_EXTERNAL,
-        dst_subpass: 0,
-        src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        src_access_mask: vk::AccessFlags::empty(),
-        dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        dependency_flags: vk::DependencyFlags::empty(),
-    }];
-    let create_info = vk::RenderPassCreateInfo::default()
-        .attachments(&attachments)
-        .subpasses(&subpasses)
-        .dependencies(&dependencies);
-    device.create_render_pass(&create_info, None).unwrap()
-}
+    unsafe fn init_render_pass(&mut self) {
+        let attachments = [vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: self.st.swapchain_image_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+        }];
+        let color_attachments = [vk::AttachmentReference {
+            attachment: 0,
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        }];
+        let subpasses = [vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachments)];
+        let dependencies = [vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dependency_flags: vk::DependencyFlags::empty(),
+        }];
+        let create_info = vk::RenderPassCreateInfo::default()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+        self.st.render_pass = self
+            .vk
+            .device
+            .create_render_pass(&create_info, None)
+            .unwrap();
+    }
 
-#[derive(Debug, Default, Clone)]
-struct PipelineInfo {
-    pipeline: vk::Pipeline,
-    layout: vk::PipelineLayout,
-}
-
-impl PipelineInfo {
-    unsafe fn new(device: &ash::Device, render_pass: vk::RenderPass) -> Self {
-        let shader_module_vert = create_shader_module(&device, BYTECODE_VERT);
-        let shader_module_frag = create_shader_module(&device, BYTECODE_FRAG);
+    unsafe fn init_pipeline(&mut self) {
+        let shader_module_vert = self.vk.create_shader_module(BYTECODE_VERT);
+        let shader_module_frag = self.vk.create_shader_module(BYTECODE_FRAG);
 
         let stage_create_infos = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -355,7 +380,9 @@ impl PipelineInfo {
         //     vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let layout_create_info = vk::PipelineLayoutCreateInfo::default();
-        let layout = device
+        let layout = self
+            .vk
+            .device
             .create_pipeline_layout(&layout_create_info, None)
             .unwrap();
         let pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::default()
@@ -368,33 +395,55 @@ impl PipelineInfo {
             .color_blend_state(&color_blend_state)
             // .dynamic_state(&dynamic_state_create_info)
             .layout(layout)
-            .render_pass(render_pass)];
-        let pipelines = device
+            .render_pass(self.st.render_pass)];
+        let pipelines = self
+            .vk
+            .device
             .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None)
             .unwrap();
 
-        device.destroy_shader_module(shader_module_frag, None);
-        device.destroy_shader_module(shader_module_vert, None);
+        self.vk
+            .device
+            .destroy_shader_module(shader_module_frag, None);
+        self.vk
+            .device
+            .destroy_shader_module(shader_module_vert, None);
 
-        Self {
-            pipeline: pipelines[0],
-            layout,
+        self.st.pipeline = pipelines[0];
+        self.st.pipeline_layout = layout;
+    }
+
+    unsafe fn init_framebuffers(&mut self) {
+        let n = self.st.swapchain_image_views.len();
+        self.st.framebuffers.clear();
+        self.st.framebuffers.reserve(n);
+        for &iv in &self.st.swapchain_image_views {
+            let attachments = [iv];
+            let create_info = vk::FramebufferCreateInfo::default()
+                .render_pass(self.st.render_pass)
+                .attachments(&attachments)
+                .width(1280)
+                .height(720)
+                .layers(1);
+            let framebuffer = self
+                .vk
+                .device
+                .create_framebuffer(&create_info, None)
+                .unwrap();
+            self.st.framebuffers.push(framebuffer);
         }
     }
 }
 
-unsafe fn create_shader_module(device: &ash::Device, bytecode: &[u8]) -> vk::ShaderModule {
-    let mut code_safe = Vec::with_capacity((bytecode.len() + 3) / 4);
-    for i in (0..bytecode.len()).step_by(4) {
-        let mut arr = [0; 4];
-        for j in i..bytecode.len().min(i + 4) {
-            arr[j - i] = bytecode[j];
+impl Drop for App {
+    fn drop(&mut self) {
+        unsafe {
+            self.vk
+                .device
+                .destroy_render_pass(self.st.render_pass, None);
+            self.deinit_swapchain();
         }
-        let u = u32::from_ne_bytes(arr);
-        code_safe.push(u);
     }
-    let create_info = vk::ShaderModuleCreateInfo::default().code(&code_safe);
-    device.create_shader_module(&create_info, None).unwrap()
 }
 
 unsafe fn create_framebuffers(
