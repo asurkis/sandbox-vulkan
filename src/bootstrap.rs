@@ -39,6 +39,7 @@ impl SdlBox {
         let video = system.video().unwrap();
         let window = video
             .window("Window1", 1280, 720)
+            .resizable()
             .position_centered()
             .vulkan()
             .build()
@@ -77,6 +78,16 @@ impl VkBox {
             queue_graphics,
             queue_present,
         }
+    }
+
+    pub unsafe fn create_semaphore(&self) -> vk::Semaphore {
+        let create_info = vk::SemaphoreCreateInfo::default();
+        self.device.create_semaphore(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_fence(&self) -> vk::Fence {
+        let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        self.device.create_fence(&create_info, None).unwrap()
     }
 
     unsafe fn create_instance(

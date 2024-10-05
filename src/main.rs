@@ -1,13 +1,10 @@
 mod bootstrap;
 
 use ash::vk;
-use bootstrap::PhysicalDeviceInfo;
 use bootstrap::SdlBox;
 use bootstrap::VkBox;
 use sdl2::event::Event;
 use std::ffi::CStr;
-use std::marker::PhantomData;
-use std::ptr;
 use std::u64;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
@@ -19,11 +16,12 @@ fn main() {
         let mut sdl = SdlBox::new();
         let vk = VkBox::new(&sdl);
 
-        let swapchain_create_info = vk.physical_device_info.swapchain_create_info();
+        let mut swapchain_create_info = vk.physical_device_info.swapchain_create_info();
         let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
-        let swapchain_st = SwapchainState::new(&vk, render_pass);
+
+        let mut swapchain_st = SwapchainState::new(&vk, swapchain_create_info, render_pass, None);
         let pipeline_info = PipelineInfo::new(&vk.device, render_pass);
-        let [command_pool] = create_command_pool(
+        let [command_pool] = create_command_pools(
             &vk.device,
             [vk.physical_device_info.queue_family_index_graphics],
         );
@@ -33,9 +31,9 @@ fn main() {
         let mut semaphores_render_finished = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
         let mut fences_in_flight = [vk::Fence::null(); MAX_CONCURRENT_FRAMES];
         for i in 0..MAX_CONCURRENT_FRAMES {
-            semaphores_image_available[i] = create_semaphore(&vk.device);
-            semaphores_render_finished[i] = create_semaphore(&vk.device);
-            fences_in_flight[i] = create_fence(&vk.device);
+            semaphores_image_available[i] = vk.create_semaphore();
+            semaphores_render_finished[i] = vk.create_semaphore();
+            fences_in_flight[i] = vk.create_fence();
         }
         let mut command_buffer_index = 0;
 
@@ -59,17 +57,20 @@ fn main() {
             vk.device
                 .wait_for_fences(&cur_fence, true, u64::MAX)
                 .unwrap();
-            vk.device.reset_fences(&cur_fence).unwrap();
-            let (image_index, suboptimal) = vk
-                .device_ext_swapchain
-                .acquire_next_image(
-                    swapchain_st.swapchain,
-                    u64::MAX,
-                    cur_image_available[0],
-                    vk::Fence::null(),
-                )
-                .unwrap();
-            assert!(!suboptimal);
+            let result = vk.device_ext_swapchain.acquire_next_image(
+                swapchain_st.swapchain,
+                u64::MAX,
+                cur_image_available[0],
+                vk::Fence::null(),
+            );
+            let image_index = match result {
+                Ok((image_index, false)) => image_index,
+                Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    swapchain_st.reinit(&vk, &mut swapchain_create_info, render_pass);
+                    continue;
+                }
+                Err(err) => panic!("Unexpected Vulkan error: {err}"),
+            };
 
             vk.device
                 .reset_command_buffer(cur_command_buffer, vk::CommandBufferResetFlags::empty())
@@ -84,12 +85,24 @@ fn main() {
                 .framebuffer(swapchain_st.framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: vk::Extent2D {
-                        width: 1280,
-                        height: 720,
-                    },
+                    extent: swapchain_create_info.image_extent,
                 })
                 .clear_values(&clear_values);
+            let viewports = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: swapchain_create_info.image_extent.width as f32,
+                height: swapchain_create_info.image_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+            let scissors = [vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: swapchain_create_info.image_extent,
+            }];
+            vk.device
+                .cmd_set_viewport(cur_command_buffer, 0, &viewports);
+            vk.device.cmd_set_scissor(cur_command_buffer, 0, &scissors);
             vk.device.cmd_begin_render_pass(
                 cur_command_buffer,
                 &render_pass_begin,
@@ -111,6 +124,7 @@ fn main() {
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&cur_render_finished)];
+            vk.device.reset_fences(&cur_fence).unwrap();
             vk.device
                 .queue_submit(vk.queue_graphics, &submit_info, cur_fence[0])
                 .unwrap();
@@ -121,9 +135,16 @@ fn main() {
                 .wait_semaphores(&cur_render_finished)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
-            vk.device_ext_swapchain
+            match vk
+                .device_ext_swapchain
                 .queue_present(vk.queue_present, &present_info)
-                .unwrap();
+            {
+                Ok(false) => {}
+                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    swapchain_st.reinit(&vk, &mut swapchain_create_info, render_pass);
+                }
+                Err(err) => panic!("Unexpected Vulkan error: {err}"),
+            };
 
             command_buffer_index = (command_buffer_index + 1) % MAX_CONCURRENT_FRAMES;
         }
@@ -148,39 +169,66 @@ fn main() {
 
 #[derive(Debug, Default, Clone)]
 struct SwapchainState {
-    create_info: vk::SwapchainCreateInfoKHR<'static>,
     swapchain: vk::SwapchainKHR,
-    images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
     framebuffers: Vec<vk::Framebuffer>,
 }
 
 impl SwapchainState {
-    unsafe fn new(vk: &VkBox, render_pass: vk::RenderPass) -> Self {
-        let create_info = vk.physical_device_info.swapchain_create_info();
-        let saved_create_info = vk::SwapchainCreateInfoKHR {
-            queue_family_index_count: 0,
-            p_queue_family_indices: ptr::null(),
-            _marker: PhantomData,
-            ..create_info
-        };
+    unsafe fn new(
+        vk: &VkBox,
+        mut create_info: vk::SwapchainCreateInfoKHR,
+        render_pass: vk::RenderPass,
+        old_swapchain: Option<Self>,
+    ) -> Self {
+        if let Some(ref st) = old_swapchain {
+            create_info.old_swapchain = st.swapchain;
+            vk.device.device_wait_idle().unwrap();
+        }
         let swapchain = vk
             .device_ext_swapchain
             .create_swapchain(&create_info, None)
             .unwrap();
+        if let Some(st) = old_swapchain {
+            st.destroy(&vk);
+        }
         let images = vk
             .device_ext_swapchain
             .get_swapchain_images(swapchain)
             .unwrap();
         let image_views = create_image_views(&vk.device, &images, create_info.image_format);
-        let framebuffers = create_framebuffers(&vk.device, &image_views, render_pass);
+        let framebuffers = create_framebuffers(
+            &vk.device,
+            &image_views,
+            create_info.image_extent,
+            render_pass,
+        );
         Self {
-            create_info: saved_create_info,
             swapchain,
-            images,
             image_views,
             framebuffers,
         }
+    }
+
+    unsafe fn reinit(
+        &mut self,
+        vk: &VkBox,
+        create_info: &mut vk::SwapchainCreateInfoKHR,
+        render_pass: vk::RenderPass,
+    ) {
+        let capabilities = vk
+            .instance_ext_surface
+            .get_physical_device_surface_capabilities(
+                vk.physical_device_info.physical_device,
+                vk.physical_device_info.surface,
+            )
+            .unwrap();
+        create_info.image_extent = capabilities.current_extent;
+        if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
+            return;
+        }
+        let old_self = std::mem::take(self);
+        *self = Self::new(vk, *create_info, render_pass, Some(old_self));
     }
 
     unsafe fn destroy(self, vk: &VkBox) {
@@ -279,21 +327,8 @@ impl PipelineInfo {
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
         let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: 1280.0,
-            height: 720.0,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: 1280,
-                height: 720,
-            },
-        }];
+        let viewports = [vk::Viewport::default()];
+        let scissors = [vk::Rect2D::default()];
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewports(&viewports)
             .scissors(&scissors);
@@ -319,9 +354,9 @@ impl PipelineInfo {
         }];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
-        // let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        // let dynamic_state_create_info =
-        //     vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state_create_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let layout_create_info = vk::PipelineLayoutCreateInfo::default();
         let layout = device
@@ -335,7 +370,7 @@ impl PipelineInfo {
             .rasterization_state(&rasterization_state)
             .multisample_state(&multisample_state)
             .color_blend_state(&color_blend_state)
-            // .dynamic_state(&dynamic_state_create_info)
+            .dynamic_state(&dynamic_state_create_info)
             .layout(layout)
             .render_pass(render_pass)];
         let pipelines = device
@@ -369,6 +404,7 @@ unsafe fn create_shader_module(device: &ash::Device, bytecode: &[u8]) -> vk::Sha
 unsafe fn create_framebuffers(
     device: &ash::Device,
     image_views: &[vk::ImageView],
+    extent: vk::Extent2D,
     render_pass: vk::RenderPass,
 ) -> Vec<vk::Framebuffer> {
     let n = image_views.len();
@@ -378,8 +414,8 @@ unsafe fn create_framebuffers(
         let create_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&attachments)
-            .width(1280)
-            .height(720)
+            .width(extent.width)
+            .height(extent.height)
             .layers(1);
         let framebuffer = device.create_framebuffer(&create_info, None).unwrap();
         framebuffers.push(framebuffer);
@@ -387,7 +423,7 @@ unsafe fn create_framebuffers(
     framebuffers
 }
 
-unsafe fn create_command_pool<const N: usize>(
+unsafe fn create_command_pools<const N: usize>(
     device: &ash::Device,
     queue_family_indices: [u32; N],
 ) -> [vk::CommandPool; N] {
@@ -410,14 +446,4 @@ unsafe fn create_command_buffers(
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(MAX_CONCURRENT_FRAMES as u32);
     device.allocate_command_buffers(&allocate_info).unwrap()
-}
-
-unsafe fn create_semaphore(device: &ash::Device) -> vk::Semaphore {
-    let create_info = vk::SemaphoreCreateInfo::default();
-    device.create_semaphore(&create_info, None).unwrap()
-}
-
-unsafe fn create_fence(device: &ash::Device) -> vk::Fence {
-    let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-    device.create_fence(&create_info, None).unwrap()
 }
