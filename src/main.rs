@@ -45,6 +45,13 @@ fn main() {
                         keycode: Some(sdl2::keyboard::Keycode::Escape),
                         ..
                     } => break 'main_loop,
+                    Event::Window {
+                        win_event: sdl2::event::WindowEvent::Resized(_, _),
+                        ..
+                    } => {
+                        swapchain_st.reinit(&vk, &mut swapchain_create_info, render_pass);
+                        continue 'main_loop;
+                    }
                     _ => {}
                 }
             }
