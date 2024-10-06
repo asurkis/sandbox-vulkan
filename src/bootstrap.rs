@@ -55,7 +55,7 @@ impl VkBox {
         let instance_ext_surface = ash::khr::surface::Instance::new(&ash_entry, &instance);
         let surface = sdl
             .window
-            .vulkan_create_surface(instance.handle().as_raw() as usize)
+            .vulkan_create_surface(instance.handle().as_raw() as _)
             .unwrap();
         let surface = vk::SurfaceKHR::from_raw(surface);
         let physical_device_info =
@@ -188,15 +188,19 @@ impl PhysicalDeviceInfo {
                 let prop = queue_family_properties[i];
                 if prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                     has_graphics = true;
-                    info.queue_family_index_graphics = i as u32;
+                    info.queue_family_index_graphics = i as _;
                 }
                 if instance_ext_surface
-                    .get_physical_device_surface_support(pd, i as u32, surface)
+                    .get_physical_device_surface_support(pd, i as _, surface)
                     .unwrap()
                 {
                     has_present = true;
-                    info.queue_family_index_present = i as u32;
+                    info.queue_family_index_present = i as _;
                 }
+            }
+
+            if !has_graphics || !has_present {
+                continue;
             }
 
             info.queue_family_indices = [
@@ -218,9 +222,7 @@ impl PhysicalDeviceInfo {
                 continue;
             }
 
-            if has_graphics && has_present {
-                return info;
-            }
+            return info;
         }
         panic!("No fitting device found");
     }

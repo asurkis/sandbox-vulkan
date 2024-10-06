@@ -20,11 +20,9 @@ fn main() {
         let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
 
         let mut swapchain_st = SwapchainState::new(&vk, swapchain_create_info, render_pass, None);
+        let vertex_buffer = create_vertex_buffer(&vk);
         let pipeline_info = PipelineInfo::new(&vk.device, render_pass);
-        let [command_pool] = create_command_pools(
-            &vk.device,
-            [vk.physical_device_info.queue_family_index_graphics],
-        );
+        let command_pool = create_command_pool(&vk);
 
         let command_buffers = create_command_buffers(&vk.device, command_pool);
         let mut semaphores_image_available = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
@@ -98,8 +96,8 @@ fn main() {
             let viewports = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
-                width: swapchain_create_info.image_extent.width as f32,
-                height: swapchain_create_info.image_extent.height as f32,
+                width: swapchain_create_info.image_extent.width as _,
+                height: swapchain_create_info.image_extent.height as _,
                 min_depth: 0.0,
                 max_depth: 1.0,
             }];
@@ -120,6 +118,8 @@ fn main() {
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline_info.pipeline,
             );
+            vk.device
+                .cmd_bind_vertex_buffers(cur_command_buffer, 0, &[vertex_buffer.buffer], &[0]);
             vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
             vk.device.cmd_end_render_pass(cur_command_buffer);
             vk.device.end_command_buffer(cur_command_buffer).unwrap();
@@ -169,6 +169,8 @@ fn main() {
         vk.device.destroy_pipeline(pipeline_info.pipeline, None);
         vk.device
             .destroy_pipeline_layout(pipeline_info.layout, None);
+        vk.device.free_memory(vertex_buffer.memory, None);
+        vk.device.destroy_buffer(vertex_buffer.buffer, None);
         swapchain_st.destroy(&vk);
         vk.device.destroy_render_pass(render_pass, None);
     }
@@ -310,7 +312,7 @@ unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::Re
     device.create_render_pass(&create_info, None).unwrap()
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 struct PipelineInfo {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
@@ -331,7 +333,28 @@ impl PipelineInfo {
                 .module(shader_module_frag)
                 .name(CStr::from_bytes_with_nul(b"main\0").unwrap()),
         ];
-        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default();
+        let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: 20,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: 8,
+            },
+        ];
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
         let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let viewports = [vk::Viewport::default()];
@@ -430,18 +453,11 @@ unsafe fn create_framebuffers(
     framebuffers
 }
 
-unsafe fn create_command_pools<const N: usize>(
-    device: &ash::Device,
-    queue_family_indices: [u32; N],
-) -> [vk::CommandPool; N] {
-    let mut command_pools = [vk::CommandPool::null(); N];
-    for i in 0..N {
-        let create_info = vk::CommandPoolCreateInfo::default()
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-            .queue_family_index(queue_family_indices[i]);
-        command_pools[i] = device.create_command_pool(&create_info, None).unwrap();
-    }
-    command_pools
+unsafe fn create_command_pool(vk: &VkBox) -> vk::CommandPool {
+    let create_info = vk::CommandPoolCreateInfo::default()
+        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+        .queue_family_index(vk.physical_device_info.queue_family_index_graphics);
+    vk.device.create_command_pool(&create_info, None).unwrap()
 }
 
 unsafe fn create_command_buffers(
@@ -451,6 +467,75 @@ unsafe fn create_command_buffers(
     let allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(MAX_CONCURRENT_FRAMES as u32);
+        .command_buffer_count(MAX_CONCURRENT_FRAMES as _);
     device.allocate_command_buffers(&allocate_info).unwrap()
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct BufferInfo {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+}
+
+unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferInfo {
+    let buffer_data = [
+        // position, color
+        ([0.0f32, -0.5], [1.0f32, 0.0, 0.0]),
+        ([0.5, 0.5], [0.0, 1.0, 0.0]),
+        ([-0.5, 0.5], [0.0, 0.0, 1.0]),
+    ];
+    let buffer_size = std::mem::size_of_val(&buffer_data);
+    let queue_family_indices = [vk.physical_device_info.queue_family_index_graphics];
+    let create_info = vk::BufferCreateInfo::default()
+        .size(buffer_size as _)
+        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .queue_family_indices(&queue_family_indices);
+    let buffer = vk.device.create_buffer(&create_info, None).unwrap();
+    let memory = allocate_buffer(
+        vk,
+        buffer,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    );
+    vk.device.bind_buffer_memory(buffer, memory, 0).unwrap();
+    let memmap = vk
+        .device
+        .map_memory(memory, 0, buffer_size as _, vk::MemoryMapFlags::empty())
+        .unwrap();
+    std::ptr::copy(
+        std::mem::transmute(buffer_data.as_ptr()),
+        memmap,
+        buffer_size,
+    );
+    vk.device.unmap_memory(memory);
+    BufferInfo { buffer, memory }
+}
+
+unsafe fn allocate_buffer(
+    vk: &VkBox,
+    buffer: vk::Buffer,
+    properties: vk::MemoryPropertyFlags,
+) -> vk::DeviceMemory {
+    let requirements = vk.device.get_buffer_memory_requirements(buffer);
+    let mem_properties = vk
+        .instance
+        .get_physical_device_memory_properties(vk.physical_device_info.physical_device);
+    let mut memory_type_index = u32::MAX;
+    for i in 0..mem_properties.memory_type_count {
+        let mem_type = &mem_properties.memory_types[i as usize];
+        if mem_type.property_flags & properties != properties {
+            continue;
+        }
+        if requirements.memory_type_bits & (1 << i) != 0 {
+            memory_type_index = i;
+            break;
+        }
+    }
+    if memory_type_index == u32::MAX {
+        panic!("No appropriate memory type found");
+    }
+    let allocate_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(requirements.size)
+        .memory_type_index(memory_type_index);
+    vk.device.allocate_memory(&allocate_info, None).unwrap()
 }
