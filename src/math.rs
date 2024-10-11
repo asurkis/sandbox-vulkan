@@ -22,22 +22,23 @@ pub trait Scalar:
     + DivAssign
 {
 }
+#[derive(Clone, Copy, Debug)]
+pub struct Vector<T: Scalar, const N: usize>(pub [T; N]);
+
+#[derive(Clone, Copy, Debug)]
+pub struct Matrix<T: Scalar, const N: usize, const M: usize>(
+    // Column-first to coerce with vector
+    pub [[T; N]; M],
+);
+
 impl Scalar for f32 {}
 impl Scalar for f64 {}
+impl Scalar for i16 {}
 impl Scalar for i32 {}
 impl Scalar for i64 {}
 impl Scalar for u16 {}
 impl Scalar for u32 {}
 impl Scalar for u64 {}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Vector<T: Scalar, const N: usize>(pub [T; N]);
-
-impl<T: Scalar, const N: usize> Default for Vector<T, N> {
-    fn default() -> Self {
-        Self([T::default(); N])
-    }
-}
 
 #[allow(unused, non_camel_case_types)]
 pub type vec2 = Vector<f32, 2>;
@@ -51,8 +52,38 @@ pub type ivec2 = Vector<i32, 2>;
 pub type ivec3 = Vector<i32, 3>;
 #[allow(unused, non_camel_case_types)]
 pub type ivec4 = Vector<i32, 4>;
+#[allow(unused, non_camel_case_types)]
+pub type mat4x4 = Matrix<f32, 4, 4>;
+#[allow(unused, non_camel_case_types)]
+pub type mat4 = mat4x4;
 
-macro_rules! impl_op_vec {
+macro_rules! impl_scalar_op {
+    ($trait:ident, $op:ident) => {
+        impl<T: Scalar, const N: usize> ::std::ops::$trait<T> for Vector<T, N> {
+            type Output = Self;
+            fn $op(mut self, rhs: T) -> Self {
+                for i in 0..N {
+                    self.0[i] = self.0[i].$op(rhs);
+                }
+                self
+            }
+        }
+
+        impl<T: Scalar, const N: usize, const M: usize> ::std::ops::$trait<T> for Matrix<T, N, M> {
+            type Output = Self;
+            fn $op(mut self, rhs: T) -> Self {
+                for col in 0..M {
+                    for row in 0..N {
+                        self.0[col][row] = self.0[col][row].$op(rhs);
+                    }
+                }
+                self
+            }
+        }
+    };
+}
+
+macro_rules! impl_op {
     ($trait:ident, $op:ident) => {
         impl<T: Scalar, const N: usize> ::std::ops::$trait for Vector<T, N> {
             type Output = Self;
@@ -63,10 +94,22 @@ macro_rules! impl_op_vec {
                 self
             }
         }
+
+        impl<T: Scalar, const N: usize, const M: usize> ::std::ops::$trait for Matrix<T, N, M> {
+            type Output = Self;
+            fn $op(mut self, rhs: Self) -> Self {
+                for col in 0..M {
+                    for row in 0..N {
+                        self.0[col][row] = self.0[col][row].$op(rhs.0[col][row]);
+                    }
+                }
+                self
+            }
+        }
     };
 }
 
-macro_rules! impl_op_assign_vec {
+macro_rules! impl_op_assign {
     ($trait:ident, $op:ident) => {
         impl<T: Scalar, const N: usize> ::std::ops::$trait for Vector<T, N> {
             fn $op(&mut self, rhs: Self) {
@@ -75,18 +118,39 @@ macro_rules! impl_op_assign_vec {
                 }
             }
         }
+
+        impl<T: Scalar, const N: usize, const M: usize> ::std::ops::$trait for Matrix<T, N, M> {
+            fn $op(&mut self, rhs: Self) {
+                for col in 0..M {
+                    for row in 0..N {
+                        self.0[col][row].$op(rhs.0[col][row]);
+                    }
+                }
+            }
+        }
     };
 }
 
-impl_op_vec!(Add, add);
-impl_op_vec!(Sub, sub);
-impl_op_vec!(Mul, mul);
-impl_op_vec!(Div, div);
+impl_scalar_op!(Add, add);
+impl_scalar_op!(Mul, mul);
+impl_scalar_op!(Sub, sub);
+impl_scalar_op!(Div, div);
 
-impl_op_assign_vec!(AddAssign, add_assign);
-impl_op_assign_vec!(SubAssign, sub_assign);
-impl_op_assign_vec!(MulAssign, mul_assign);
-impl_op_assign_vec!(DivAssign, div_assign);
+impl_op!(Add, add);
+impl_op!(Sub, sub);
+impl_op!(Mul, mul);
+impl_op!(Div, div);
+
+impl_op_assign!(AddAssign, add_assign);
+impl_op_assign!(SubAssign, sub_assign);
+impl_op_assign!(MulAssign, mul_assign);
+impl_op_assign!(DivAssign, div_assign);
+
+impl<T: Scalar, const N: usize> Default for Vector<T, N> {
+    fn default() -> Self {
+        Self([T::default(); N])
+    }
+}
 
 impl<T: Scalar, const N: usize> Vector<T, N> {
     #[allow(unused)]
@@ -171,5 +235,66 @@ impl<T: Scalar> Vector<T, 3> {
             self.z() * rhs.x() - self.x() * rhs.z(),
             self.x() * rhs.y() - self.y() * rhs.z(),
         ])
+    }
+}
+
+impl<T: Scalar, const N: usize, const M: usize> Default for Matrix<T, N, M> {
+    fn default() -> Self {
+        Self([[T::default(); N]; M])
+    }
+}
+
+impl<T: Scalar, const N: usize, const M: usize> Matrix<T, N, M> {
+    #[allow(unused)]
+    pub fn transpose(&self) -> Matrix<T, M, N> {
+        let mut result = Matrix::default();
+        for col in 0..M {
+            for row in 0..N {
+                result.0[row][col] = self.0[col][row];
+            }
+        }
+        result
+    }
+
+    #[allow(unused)]
+    pub fn dot<const K: usize>(&self, rhs: &Matrix<T, M, K>) -> Matrix<T, N, K> {
+        let mut result = Matrix::default();
+        for col in 0..K {
+            for row in 0..N {
+                for i in 0..M {
+                    result.0[col][row] += self.0[i][row] * rhs.0[col][i];
+                }
+            }
+        }
+        result
+    }
+
+    #[allow(unused)]
+    pub fn dotv(&self, rhs: Vector<T, M>) -> Vector<T, N> {
+        self.dot(&rhs.into()).into()
+    }
+}
+
+impl<T: Scalar, const N: usize> From<T> for Vector<T, N> {
+    fn from(value: T) -> Self {
+        Self([value; N])
+    }
+}
+
+impl<T: Scalar, const N: usize, const M: usize> From<T> for Matrix<T, N, M> {
+    fn from(value: T) -> Self {
+        Self([[value; N]; M])
+    }
+}
+
+impl<T: Scalar, const N: usize> From<Matrix<T, N, 1>> for Vector<T, N> {
+    fn from(value: Matrix<T, N, 1>) -> Self {
+        Self(value.0[0])
+    }
+}
+
+impl<T: Scalar, const N: usize> From<Vector<T, N>> for Matrix<T, N, 1> {
+    fn from(value: Vector<T, N>) -> Self {
+        Matrix([value.0])
     }
 }
