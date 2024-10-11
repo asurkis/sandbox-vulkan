@@ -10,9 +10,18 @@ use std::ptr;
 use std::slice;
 use std::u64;
 
+const MAX_CONCURRENT_FRAMES: usize = 2;
+
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
-const MAX_CONCURRENT_FRAMES: usize = 2;
+const VERTEX_DATA: &[([f32; 2], [f32; 3])] = &[
+    // position, color
+    ([0.5f32, -0.5], [1.0f32, 0.0, 0.0]),
+    ([-0.5, -0.5], [0.0, 1.0, 0.0]),
+    ([-0.5, 0.5], [0.0, 1.0, 1.0]),
+    ([0.5, 0.5], [0.0, 0.0, 1.0]),
+];
+const INDEX_DATA: &[u16] = &[0, 1, 2, 0, 2, 3];
 
 fn main() {
     unsafe {
@@ -26,7 +35,7 @@ fn main() {
         let pipeline = PipelineBox::new(&vk.device, render_pass);
         let command_pool = create_command_pool(&vk);
         let command_pool_transient = create_command_pool_transient(&vk);
-        let vertex_buffer = create_vertex_buffer(&vk, command_pool_transient);
+        let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient);
 
         let command_buffers =
             allocate_command_buffers(&vk.device, command_pool, MAX_CONCURRENT_FRAMES as _);
@@ -125,7 +134,14 @@ fn main() {
             );
             vk.device
                 .cmd_bind_vertex_buffers(cur_command_buffer, 0, &[vertex_buffer.buffer], &[0]);
-            vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
+            vk.device.cmd_bind_index_buffer(
+                cur_command_buffer,
+                index_buffer.buffer,
+                0,
+                vk::IndexType::UINT16,
+            );
+            vk.device
+                .cmd_draw_indexed(cur_command_buffer, 6, 1, 0, 0, 0);
             vk.device.cmd_end_render_pass(cur_command_buffer);
             vk.device.end_command_buffer(cur_command_buffer).unwrap();
 
@@ -175,6 +191,7 @@ fn main() {
         vk.device.destroy_pipeline(pipeline.pipeline, None);
         vk.device.destroy_pipeline_layout(pipeline.layout, None);
         vertex_buffer.destroy(&vk);
+        index_buffer.destroy(&vk);
         swapchain.destroy(&vk);
         vk.device.destroy_render_pass(render_pass, None);
     }
@@ -368,8 +385,8 @@ impl PipelineBox {
             .scissors(&scissors);
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
-            // .cull_mode(vk::CullModeFlags::BACK)
-            // .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .cull_mode(vk::CullModeFlags::BACK)
+            // .front_face(vk::FrontFace::CLOCKWISE)
             .line_width(1.0);
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -586,23 +603,25 @@ impl BufferBox {
             .queue_submit(vk.queue_graphics, &submits, vk::Fence::null())
             .unwrap();
         vk.device.queue_wait_idle(vk.queue_graphics).unwrap();
-        vk.device.free_command_buffers(command_pool, slice::from_ref(&command_buffer));
+        vk.device
+            .free_command_buffers(command_pool, slice::from_ref(&command_buffer));
         staging.destroy(vk);
         out
     }
 }
 
-unsafe fn create_vertex_buffer(vk: &VkBox, command_pool: vk::CommandPool) -> BufferBox {
-    let buffer_data = [
-        // position, color
-        ([0.0f32, -0.5], [1.0f32, 0.0, 0.0]),
-        ([0.5, 0.5], [0.0, 1.0, 0.0]),
-        ([-0.5, 0.5], [0.0, 0.0, 1.0]),
-    ];
-    BufferBox::upload(
+unsafe fn create_mesh(vk: &VkBox, command_pool: vk::CommandPool) -> (BufferBox, BufferBox) {
+    let vertex_buffer = BufferBox::upload(
         vk,
-        &buffer_data,
+        &VERTEX_DATA,
         vk::BufferUsageFlags::VERTEX_BUFFER,
         command_pool,
-    )
+    );
+    let index_buffer = BufferBox::upload(
+        vk,
+        &INDEX_DATA,
+        vk::BufferUsageFlags::INDEX_BUFFER,
+        command_pool,
+    );
+    (vertex_buffer, index_buffer)
 }
