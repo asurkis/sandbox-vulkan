@@ -19,12 +19,12 @@ fn main() {
         let mut sdl = SdlBox::new();
         let vk = VkBox::new(&sdl);
 
-        let mut swapchain_create_info = vk.physical_device_info.swapchain_create_info();
+        let mut swapchain_create_info = vk.physical_device.swapchain_create_info();
         let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
 
-        let mut swapchain_st = SwapchainState::new(&vk, swapchain_create_info, render_pass, None);
+        let mut swapchain = SwapchainBox::new(&vk, swapchain_create_info, render_pass, None);
         let vertex_buffer = create_vertex_buffer(&vk);
-        let pipeline_info = PipelineInfo::new(&vk.device, render_pass);
+        let pipeline = PipelineBox::new(&vk.device, render_pass);
         let command_pool = create_command_pool(&vk);
 
         let command_buffers = create_command_buffers(&vk.device, command_pool);
@@ -50,7 +50,7 @@ fn main() {
                         win_event: sdl2::event::WindowEvent::Resized(_, _),
                         ..
                     } => {
-                        swapchain_st.reinit(&vk, &mut swapchain_create_info, render_pass);
+                        swapchain.reinit(&vk, &mut swapchain_create_info, render_pass);
                         continue 'main_loop;
                     }
                     _ => {}
@@ -66,7 +66,7 @@ fn main() {
                 .wait_for_fences(slice::from_ref(&cur_fence), true, u64::MAX)
                 .unwrap();
             let result = vk.device_ext_swapchain.acquire_next_image(
-                swapchain_st.swapchain,
+                swapchain.swapchain,
                 u64::MAX,
                 cur_image_available,
                 vk::Fence::null(),
@@ -74,7 +74,7 @@ fn main() {
             let image_index = match result {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain_st.reinit(&vk, &mut swapchain_create_info, render_pass);
+                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass);
                     continue;
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
@@ -90,7 +90,7 @@ fn main() {
             let clear_values = [vk::ClearValue::default()];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass)
-                .framebuffer(swapchain_st.framebuffers[image_index as usize])
+                .framebuffer(swapchain.framebuffers[image_index as usize])
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: swapchain_create_info.image_extent,
@@ -119,7 +119,7 @@ fn main() {
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline_info.pipeline,
+                pipeline.pipeline,
             );
             vk.device
                 .cmd_bind_vertex_buffers(cur_command_buffer, 0, &[vertex_buffer.buffer], &[0]);
@@ -139,7 +139,7 @@ fn main() {
                 .queue_submit(vk.queue_graphics, &submit_info, cur_fence)
                 .unwrap();
 
-            let swapchains = [swapchain_st.swapchain];
+            let swapchains = [swapchain.swapchain];
             let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
                 .wait_semaphores(slice::from_ref(&cur_render_finished))
@@ -151,7 +151,7 @@ fn main() {
             {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain_st.reinit(&vk, &mut swapchain_create_info, render_pass);
+                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass);
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
@@ -169,23 +169,22 @@ fn main() {
                 .destroy_semaphore(semaphores_render_finished[i], None);
         }
         vk.device.destroy_command_pool(command_pool, None);
-        vk.device.destroy_pipeline(pipeline_info.pipeline, None);
-        vk.device
-            .destroy_pipeline_layout(pipeline_info.layout, None);
+        vk.device.destroy_pipeline(pipeline.pipeline, None);
+        vk.device.destroy_pipeline_layout(pipeline.layout, None);
         vertex_buffer.destroy(&vk);
-        swapchain_st.destroy(&vk);
+        swapchain.destroy(&vk);
         vk.device.destroy_render_pass(render_pass, None);
     }
 }
 
 #[derive(Debug, Default, Clone)]
-struct SwapchainState {
+struct SwapchainBox {
     swapchain: vk::SwapchainKHR,
     image_views: Vec<vk::ImageView>,
     framebuffers: Vec<vk::Framebuffer>,
 }
 
-impl SwapchainState {
+impl SwapchainBox {
     unsafe fn new(
         vk: &VkBox,
         mut create_info: vk::SwapchainCreateInfoKHR,
@@ -230,8 +229,8 @@ impl SwapchainState {
         let capabilities = vk
             .instance_ext_surface
             .get_physical_device_surface_capabilities(
-                vk.physical_device_info.physical_device,
-                vk.physical_device_info.surface,
+                vk.physical_device.physical_device,
+                vk.physical_device.surface,
             )
             .unwrap();
         create_info.image_extent = capabilities.current_extent;
@@ -315,12 +314,12 @@ unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::Re
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct PipelineInfo {
+struct PipelineBox {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
 }
 
-impl PipelineInfo {
+impl PipelineBox {
     unsafe fn new(device: &ash::Device, render_pass: vk::RenderPass) -> Self {
         let shader_module_vert = create_shader_module(&device, BYTECODE_VERT);
         let shader_module_frag = create_shader_module(&device, BYTECODE_FRAG);
@@ -458,7 +457,7 @@ unsafe fn create_framebuffers(
 unsafe fn create_command_pool(vk: &VkBox) -> vk::CommandPool {
     let create_info = vk::CommandPoolCreateInfo::default()
         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-        .queue_family_index(vk.physical_device_info.queue_family_index_graphics);
+        .queue_family_index(vk.physical_device.queue_family_index_graphics);
     vk.device.create_command_pool(&create_info, None).unwrap()
 }
 
@@ -474,19 +473,19 @@ unsafe fn create_command_buffers(
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct BufferInfo {
+struct BufferBox {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
 }
 
-impl BufferInfo {
+impl BufferBox {
     unsafe fn new(
         vk: &VkBox,
         size: u64,
         usage: vk::BufferUsageFlags,
         memory_property_flags: vk::MemoryPropertyFlags,
     ) -> Self {
-        let queue_family_indices = [vk.physical_device_info.queue_family_index_graphics];
+        let queue_family_indices = [vk.physical_device.queue_family_index_graphics];
         let create_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(usage)
@@ -497,7 +496,7 @@ impl BufferInfo {
         let memory_requirements = vk.device.get_buffer_memory_requirements(buffer);
         let memory_properties = vk
             .instance
-            .get_physical_device_memory_properties(vk.physical_device_info.physical_device);
+            .get_physical_device_memory_properties(vk.physical_device.physical_device);
 
         let mut memory_type_index = u32::MAX;
         for (i, memory_type) in memory_properties.memory_types_as_slice().iter().enumerate() {
@@ -526,7 +525,7 @@ impl BufferInfo {
     }
 }
 
-unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferInfo {
+unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferBox {
     let buffer_data = [
         // position, color
         ([0.0f32, -0.5], [1.0f32, 0.0, 0.0]),
@@ -534,7 +533,7 @@ unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferInfo {
         ([-0.5, 0.5], [0.0, 0.0, 1.0]),
     ];
     let buffer_size = mem::size_of_val(&buffer_data);
-    let buffer = BufferInfo::new(
+    let buffer = BufferBox::new(
         vk,
         buffer_size as _,
         vk::BufferUsageFlags::VERTEX_BUFFER,

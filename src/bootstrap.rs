@@ -13,7 +13,7 @@ pub struct SdlBox {
 pub struct VkBox {
     pub instance: ash::Instance,
     pub instance_ext_surface: ash::khr::surface::Instance,
-    pub physical_device_info: PhysicalDeviceInfo,
+    pub physical_device: PhysicalDeviceBox,
     pub device: ash::Device,
     pub device_ext_swapchain: ash::khr::swapchain::Device,
     pub queue_graphics: vk::Queue,
@@ -21,7 +21,7 @@ pub struct VkBox {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct PhysicalDeviceInfo {
+pub struct PhysicalDeviceBox {
     pub surface: vk::SurfaceKHR,
     pub physical_device: vk::PhysicalDevice,
     pub queue_family_indices: [u32; 2],
@@ -58,21 +58,21 @@ impl VkBox {
             .vulkan_create_surface(instance.handle().as_raw() as _)
             .unwrap();
         let surface = vk::SurfaceKHR::from_raw(surface);
-        let physical_device_info =
-            PhysicalDeviceInfo::new(&instance, &instance_ext_surface, surface);
+        let physical_device =
+            PhysicalDeviceBox::new(&instance, &instance_ext_surface, surface);
         let (device, [queue_graphics, queue_present]) = Self::create_device(
             &instance,
-            physical_device_info.physical_device,
+            physical_device.physical_device,
             [
-                physical_device_info.queue_family_index_graphics,
-                physical_device_info.queue_family_index_present,
+                physical_device.queue_family_index_graphics,
+                physical_device.queue_family_index_present,
             ],
         );
         let device_ext_swapchain = ash::khr::swapchain::Device::new(&instance, &device);
         Self {
             instance,
             instance_ext_surface,
-            physical_device_info,
+            physical_device,
             device,
             device_ext_swapchain,
             queue_graphics,
@@ -158,13 +158,13 @@ impl Drop for VkBox {
         unsafe {
             self.device.destroy_device(None);
             self.instance_ext_surface
-                .destroy_surface(self.physical_device_info.surface, None);
+                .destroy_surface(self.physical_device.surface, None);
             self.instance.destroy_instance(None);
         }
     }
 }
 
-impl PhysicalDeviceInfo {
+impl PhysicalDeviceBox {
     unsafe fn new(
         instance: &ash::Instance,
         instance_ext_surface: &ash::khr::surface::Instance,
