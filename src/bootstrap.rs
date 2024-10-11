@@ -86,6 +86,11 @@ impl VkBox {
     }
 
     pub unsafe fn create_fence(&self) -> vk::Fence {
+        let create_info = vk::FenceCreateInfo::default();
+        self.device.create_fence(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_fence_signaled(&self) -> vk::Fence {
         let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         self.device.create_fence(&create_info, None).unwrap()
     }

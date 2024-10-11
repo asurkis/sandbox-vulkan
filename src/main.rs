@@ -5,6 +5,9 @@ use bootstrap::SdlBox;
 use bootstrap::VkBox;
 use sdl2::event::Event;
 use std::ffi::CStr;
+use std::mem;
+use std::ptr;
+use std::slice;
 use std::u64;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
@@ -31,7 +34,7 @@ fn main() {
         for i in 0..MAX_CONCURRENT_FRAMES {
             semaphores_image_available[i] = vk.create_semaphore();
             semaphores_render_finished[i] = vk.create_semaphore();
-            fences_in_flight[i] = vk.create_fence();
+            fences_in_flight[i] = vk.create_fence_signaled();
         }
         let mut command_buffer_index = 0;
 
@@ -55,17 +58,17 @@ fn main() {
             }
 
             let cur_command_buffer = command_buffers[command_buffer_index];
-            let cur_fence = [fences_in_flight[command_buffer_index]];
-            let cur_image_available = [semaphores_image_available[command_buffer_index]];
-            let cur_render_finished = [semaphores_render_finished[command_buffer_index]];
+            let cur_fence = fences_in_flight[command_buffer_index];
+            let cur_image_available = semaphores_image_available[command_buffer_index];
+            let cur_render_finished = semaphores_render_finished[command_buffer_index];
 
             vk.device
-                .wait_for_fences(&cur_fence, true, u64::MAX)
+                .wait_for_fences(slice::from_ref(&cur_fence), true, u64::MAX)
                 .unwrap();
             let result = vk.device_ext_swapchain.acquire_next_image(
                 swapchain_st.swapchain,
                 u64::MAX,
-                cur_image_available[0],
+                cur_image_available,
                 vk::Fence::null(),
             );
             let image_index = match result {
@@ -127,19 +130,19 @@ fn main() {
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let command_buffers = [cur_command_buffer];
             let submit_info = [vk::SubmitInfo::default()
-                .wait_semaphores(&cur_image_available)
+                .wait_semaphores(slice::from_ref(&cur_image_available))
                 .wait_dst_stage_mask(&wait_stages)
                 .command_buffers(&command_buffers)
-                .signal_semaphores(&cur_render_finished)];
-            vk.device.reset_fences(&cur_fence).unwrap();
+                .signal_semaphores(slice::from_ref(&cur_render_finished))];
+            vk.device.reset_fences(slice::from_ref(&cur_fence)).unwrap();
             vk.device
-                .queue_submit(vk.queue_graphics, &submit_info, cur_fence[0])
+                .queue_submit(vk.queue_graphics, &submit_info, cur_fence)
                 .unwrap();
 
             let swapchains = [swapchain_st.swapchain];
             let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
-                .wait_semaphores(&cur_render_finished)
+                .wait_semaphores(slice::from_ref(&cur_render_finished))
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
             match vk
@@ -169,8 +172,7 @@ fn main() {
         vk.device.destroy_pipeline(pipeline_info.pipeline, None);
         vk.device
             .destroy_pipeline_layout(pipeline_info.layout, None);
-        vk.device.free_memory(vertex_buffer.memory, None);
-        vk.device.destroy_buffer(vertex_buffer.buffer, None);
+        vertex_buffer.destroy(&vk);
         swapchain_st.destroy(&vk);
         vk.device.destroy_render_pass(render_pass, None);
     }
@@ -236,7 +238,7 @@ impl SwapchainState {
         if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
             return;
         }
-        let old_self = std::mem::take(self);
+        let old_self = mem::take(self);
         *self = Self::new(vk, *create_info, render_pass, Some(old_self));
     }
 
@@ -477,6 +479,53 @@ struct BufferInfo {
     memory: vk::DeviceMemory,
 }
 
+impl BufferInfo {
+    unsafe fn new(
+        vk: &VkBox,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        memory_property_flags: vk::MemoryPropertyFlags,
+    ) -> Self {
+        let queue_family_indices = [vk.physical_device_info.queue_family_index_graphics];
+        let create_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_family_indices);
+        let buffer = vk.device.create_buffer(&create_info, None).unwrap();
+
+        let memory_requirements = vk.device.get_buffer_memory_requirements(buffer);
+        let memory_properties = vk
+            .instance
+            .get_physical_device_memory_properties(vk.physical_device_info.physical_device);
+
+        let mut memory_type_index = u32::MAX;
+        for (i, memory_type) in memory_properties.memory_types_as_slice().iter().enumerate() {
+            if memory_type.property_flags & memory_property_flags != memory_property_flags {
+                continue;
+            }
+            if memory_requirements.memory_type_bits & (1 << i) != 0 {
+                memory_type_index = i as _;
+                break;
+            }
+        }
+        if memory_type_index == u32::MAX {
+            panic!("No appropriate memory type found!");
+        }
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_requirements.size)
+            .memory_type_index(memory_type_index);
+        let memory = vk.device.allocate_memory(&allocate_info, None).unwrap();
+        vk.device.bind_buffer_memory(buffer, memory, 0).unwrap();
+        Self { buffer, memory }
+    }
+
+    unsafe fn destroy(self, vk: &VkBox) {
+        vk.device.free_memory(self.memory, None);
+        vk.device.destroy_buffer(self.buffer, None);
+    }
+}
+
 unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferInfo {
     let buffer_data = [
         // position, color
@@ -484,58 +533,23 @@ unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferInfo {
         ([0.5, 0.5], [0.0, 1.0, 0.0]),
         ([-0.5, 0.5], [0.0, 0.0, 1.0]),
     ];
-    let buffer_size = std::mem::size_of_val(&buffer_data);
-    let queue_family_indices = [vk.physical_device_info.queue_family_index_graphics];
-    let create_info = vk::BufferCreateInfo::default()
-        .size(buffer_size as _)
-        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .queue_family_indices(&queue_family_indices);
-    let buffer = vk.device.create_buffer(&create_info, None).unwrap();
-    let memory = allocate_buffer(
+    let buffer_size = mem::size_of_val(&buffer_data);
+    let buffer = BufferInfo::new(
         vk,
-        buffer,
+        buffer_size as _,
+        vk::BufferUsageFlags::VERTEX_BUFFER,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
     );
-    vk.device.bind_buffer_memory(buffer, memory, 0).unwrap();
     let memmap = vk
         .device
-        .map_memory(memory, 0, buffer_size as _, vk::MemoryMapFlags::empty())
+        .map_memory(
+            buffer.memory,
+            0,
+            buffer_size as _,
+            vk::MemoryMapFlags::empty(),
+        )
         .unwrap();
-    std::ptr::copy(
-        std::mem::transmute(buffer_data.as_ptr()),
-        memmap,
-        buffer_size,
-    );
-    vk.device.unmap_memory(memory);
-    BufferInfo { buffer, memory }
-}
-
-unsafe fn allocate_buffer(
-    vk: &VkBox,
-    buffer: vk::Buffer,
-    properties: vk::MemoryPropertyFlags,
-) -> vk::DeviceMemory {
-    let requirements = vk.device.get_buffer_memory_requirements(buffer);
-    let mem_properties = vk
-        .instance
-        .get_physical_device_memory_properties(vk.physical_device_info.physical_device);
-    let mut memory_type_index = u32::MAX;
-    for i in 0..mem_properties.memory_type_count {
-        let mem_type = &mem_properties.memory_types[i as usize];
-        if mem_type.property_flags & properties != properties {
-            continue;
-        }
-        if requirements.memory_type_bits & (1 << i) != 0 {
-            memory_type_index = i;
-            break;
-        }
-    }
-    if memory_type_index == u32::MAX {
-        panic!("No appropriate memory type found");
-    }
-    let allocate_info = vk::MemoryAllocateInfo::default()
-        .allocation_size(requirements.size)
-        .memory_type_index(memory_type_index);
-    vk.device.allocate_memory(&allocate_info, None).unwrap()
+    ptr::copy(mem::transmute(buffer_data.as_ptr()), memmap, buffer_size);
+    vk.device.unmap_memory(buffer.memory);
+    buffer
 }
