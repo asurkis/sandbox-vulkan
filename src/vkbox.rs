@@ -15,6 +15,11 @@ macro_rules! declare_box {
             pub fn wrap(vk: &'a crate::bootstrap::VkContext, x: ::ash::vk::$typ) -> Self {
                 Self(x, vk)
             }
+
+            #[allow(unused)]
+            pub fn null(vk: &'a crate::bootstrap::VkContext) -> Self {
+                Self(::ash::vk::$typ::null(), vk)
+            }
         }
 
         impl Drop for $typ<'_> {
@@ -84,11 +89,25 @@ declare_box!(
     destroy_framebuffer
 );
 declare_box!(
+    DescriptorSetLayout,
+    device,
+    DescriptorSetLayoutCreateInfo,
+    create_descriptor_set_layout,
+    destroy_descriptor_set_layout
+);
+declare_box!(
     PipelineLayout,
     device,
     PipelineLayoutCreateInfo,
     create_pipeline_layout,
     destroy_pipeline_layout
+);
+declare_box!(
+    DescriptorPool,
+    device,
+    DescriptorPoolCreateInfo,
+    create_descriptor_pool,
+    destroy_descriptor_pool
 );
 
 declare_box!(

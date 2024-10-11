@@ -12,13 +12,21 @@ use math::vec3;
 use math::Vector;
 use sdl2::event::Event;
 use std::ffi::CStr;
+use std::mem;
+use std::ptr;
 use std::slice;
+use std::time;
 use std::u64;
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
+
+#[derive(Clone, Copy, Debug, Default)]
+struct UniformData {
+    shift: vec2,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Vertex {
@@ -60,18 +68,52 @@ fn main() {
         let command_pool_transient = vk.create_graphics_transient_command_pool();
         let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
 
+        let mut uniform_data = UniformData {
+            shift: Vector::default(),
+        };
+        let uniform_data_size = mem::size_of_val(&uniform_data);
+
         let command_buffers =
             vk.allocate_command_buffers(command_pool.0, MAX_CONCURRENT_FRAMES as _);
+        let mut uniform_buffers = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut uniform_mappings = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         let mut semaphores_image_available = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         let mut semaphores_render_finished = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         let mut fences_in_flight = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         for _ in 0..MAX_CONCURRENT_FRAMES {
+            let uniform_buffer = CommittedBuffer::new(
+                &vk,
+                mem::size_of_val(&uniform_data) as _,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            );
+            let memory_mapping = vk
+                .device
+                .map_memory(
+                    uniform_buffer.memory.0,
+                    0,
+                    uniform_data_size as _,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+            uniform_mappings.push(memory_mapping);
+            uniform_buffers.push(uniform_buffer);
             semaphores_image_available.push(vk.create_semaphore());
             semaphores_render_finished.push(vk.create_semaphore());
             fences_in_flight.push(vk.create_fence_signaled());
         }
+
+        let descriptor_pool = create_descriptor_pool(&vk);
+        let descriptor_sets = create_descriptor_sets(
+            &vk,
+            descriptor_pool.0,
+            pipeline.descriptor_set_layout.0,
+            &uniform_buffers,
+        );
+
         let mut command_buffer_index = 0;
 
+        let loop_start_instant = time::Instant::now();
         'main_loop: loop {
             for evt in sdl.event_pump.poll_iter() {
                 match evt {
@@ -91,10 +133,23 @@ fn main() {
                 }
             }
 
+            let time_elapsed = time::Instant::now() - loop_start_instant;
+            let angle = std::f64::consts::PI * 2.0 * time_elapsed.subsec_millis() as f64 / 1000.0;
+            let (sin, cos) = angle.sin_cos();
+            uniform_data.shift = Vector([cos as _, sin as _]) * 0.5;
+
             let cur_command_buffer = command_buffers[command_buffer_index];
+            let cur_uniform_mapping = uniform_mappings[command_buffer_index];
             let cur_fence = fences_in_flight[command_buffer_index].0;
             let cur_image_available = semaphores_image_available[command_buffer_index].0;
             let cur_render_finished = semaphores_render_finished[command_buffer_index].0;
+            let cur_descriptor_set = descriptor_sets[command_buffer_index];
+
+            ptr::copy(
+                mem::transmute(&uniform_data as *const _),
+                cur_uniform_mapping,
+                uniform_data_size,
+            );
 
             vk.device
                 .wait_for_fences(slice::from_ref(&cur_fence), true, u64::MAX)
@@ -166,6 +221,14 @@ fn main() {
                 index_buffer.buffer.0,
                 0,
                 vk::IndexType::UINT16,
+            );
+            vk.device.cmd_bind_descriptor_sets(
+                cur_command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.layout.0,
+                0,
+                slice::from_ref(&cur_descriptor_set),
+                &[],
             );
             vk.device
                 .cmd_draw_indexed(cur_command_buffer, 6, 1, 0, 0, 0);
@@ -244,8 +307,9 @@ unsafe fn create_render_pass(vk: &VkContext, format: vk::Format) -> vkbox::Rende
 
 #[derive(Debug)]
 struct PipelineBox<'a> {
-    _layout: vkbox::PipelineLayout<'a>,
     pipeline: vk::Pipeline,
+    layout: vkbox::PipelineLayout<'a>,
+    descriptor_set_layout: vkbox::DescriptorSetLayout<'a>,
 }
 
 impl<'a> PipelineBox<'a> {
@@ -318,7 +382,18 @@ impl<'a> PipelineBox<'a> {
         let dynamic_state_create_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        let layout_create_info = vk::PipelineLayoutCreateInfo::default();
+        let bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX)];
+        let descriptor_set_layout_create_info =
+            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let descriptor_set_layout =
+            vkbox::DescriptorSetLayout::new(vk, &descriptor_set_layout_create_info);
+
+        let layout_create_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(slice::from_ref(&descriptor_set_layout.0));
         let layout = vkbox::PipelineLayout::new(vk, &layout_create_info);
         let pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stage_create_infos)
@@ -337,10 +412,52 @@ impl<'a> PipelineBox<'a> {
             .unwrap();
 
         Self {
-            _layout: layout,
             pipeline: pipelines[0],
+            layout,
+            descriptor_set_layout,
         }
     }
+}
+
+unsafe fn create_descriptor_pool(vk: &VkContext) -> vkbox::DescriptorPool {
+    let pool_sizes = [vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::UNIFORM_BUFFER,
+        descriptor_count: MAX_CONCURRENT_FRAMES as _,
+    }];
+    let create_info = vk::DescriptorPoolCreateInfo::default()
+        .flags(vk::DescriptorPoolCreateFlags::empty())
+        .max_sets(MAX_CONCURRENT_FRAMES as _)
+        .pool_sizes(&pool_sizes);
+    vkbox::DescriptorPool::new(vk, &create_info)
+}
+
+unsafe fn create_descriptor_sets(
+    vk: &VkContext,
+    descriptor_pool: vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
+    uniform_buffers: &[CommittedBuffer],
+) -> Vec<vk::DescriptorSet> {
+    let set_layouts = [layout; MAX_CONCURRENT_FRAMES];
+    let allocate_info = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(descriptor_pool)
+        .set_layouts(&set_layouts);
+    let sets = vk.device.allocate_descriptor_sets(&allocate_info).unwrap();
+    for i in 0..MAX_CONCURRENT_FRAMES {
+        let buffer_info = [vk::DescriptorBufferInfo {
+            buffer: uniform_buffers[i].buffer.0,
+            offset: 0,
+            range: mem::size_of::<UniformData>() as _,
+        }];
+        let descriptor_write = vk::WriteDescriptorSet::default()
+            .dst_set(sets[i])
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(&buffer_info);
+        vk.device
+            .update_descriptor_sets(slice::from_ref(&descriptor_write), &[]);
+    }
+    sets
 }
 
 unsafe fn create_mesh(
