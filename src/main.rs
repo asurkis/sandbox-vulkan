@@ -23,11 +23,13 @@ fn main() {
         let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
 
         let mut swapchain = SwapchainBox::new(&vk, swapchain_create_info, render_pass, None);
-        let vertex_buffer = create_vertex_buffer(&vk);
         let pipeline = PipelineBox::new(&vk.device, render_pass);
         let command_pool = create_command_pool(&vk);
+        let command_pool_transient = create_command_pool_transient(&vk);
+        let vertex_buffer = create_vertex_buffer(&vk, command_pool_transient);
 
-        let command_buffers = create_command_buffers(&vk.device, command_pool);
+        let command_buffers =
+            allocate_command_buffers(&vk.device, command_pool, MAX_CONCURRENT_FRAMES as _);
         let mut semaphores_image_available = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
         let mut semaphores_render_finished = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
         let mut fences_in_flight = [vk::Fence::null(); MAX_CONCURRENT_FRAMES];
@@ -168,6 +170,7 @@ fn main() {
             vk.device
                 .destroy_semaphore(semaphores_render_finished[i], None);
         }
+        vk.device.destroy_command_pool(command_pool_transient, None);
         vk.device.destroy_command_pool(command_pool, None);
         vk.device.destroy_pipeline(pipeline.pipeline, None);
         vk.device.destroy_pipeline_layout(pipeline.layout, None);
@@ -461,14 +464,22 @@ unsafe fn create_command_pool(vk: &VkBox) -> vk::CommandPool {
     vk.device.create_command_pool(&create_info, None).unwrap()
 }
 
-unsafe fn create_command_buffers(
+unsafe fn create_command_pool_transient(vk: &VkBox) -> vk::CommandPool {
+    let create_info = vk::CommandPoolCreateInfo::default()
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+        .queue_family_index(vk.physical_device.queue_family_index_graphics);
+    vk.device.create_command_pool(&create_info, None).unwrap()
+}
+
+unsafe fn allocate_command_buffers(
     device: &ash::Device,
     command_pool: vk::CommandPool,
+    count: u32,
 ) -> Vec<vk::CommandBuffer> {
     let allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(MAX_CONCURRENT_FRAMES as _);
+        .command_buffer_count(count);
     device.allocate_command_buffers(&allocate_info).unwrap()
 }
 
@@ -523,32 +534,75 @@ impl BufferBox {
         vk.device.free_memory(self.memory, None);
         vk.device.destroy_buffer(self.buffer, None);
     }
+
+    unsafe fn upload<T: Copy>(
+        vk: &VkBox,
+        data: &[T],
+        usage: vk::BufferUsageFlags,
+        command_pool: vk::CommandPool,
+    ) -> Self {
+        let data_size = mem::size_of_val(data);
+        let out = Self::new(
+            vk,
+            data_size as _,
+            usage | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+        let staging = Self::new(
+            vk,
+            data_size as _,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        let memmap = vk
+            .device
+            .map_memory(
+                staging.memory,
+                0,
+                data_size as _,
+                vk::MemoryMapFlags::empty(),
+            )
+            .unwrap();
+        ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
+        vk.device.unmap_memory(staging.memory);
+
+        let command_buffer = allocate_command_buffers(&vk.device, command_pool, 1)[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        vk.device
+            .begin_command_buffer(command_buffer, &begin_info)
+            .unwrap();
+        let regions = [vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: data_size as _,
+        }];
+        vk.device
+            .cmd_copy_buffer(command_buffer, staging.buffer, out.buffer, &regions);
+        vk.device.end_command_buffer(command_buffer).unwrap();
+
+        let submits = [vk::SubmitInfo::default().command_buffers(slice::from_ref(&command_buffer))];
+        vk.device
+            .queue_submit(vk.queue_graphics, &submits, vk::Fence::null())
+            .unwrap();
+        vk.device.queue_wait_idle(vk.queue_graphics).unwrap();
+        vk.device.free_command_buffers(command_pool, slice::from_ref(&command_buffer));
+        staging.destroy(vk);
+        out
+    }
 }
 
-unsafe fn create_vertex_buffer(vk: &VkBox) -> BufferBox {
+unsafe fn create_vertex_buffer(vk: &VkBox, command_pool: vk::CommandPool) -> BufferBox {
     let buffer_data = [
         // position, color
         ([0.0f32, -0.5], [1.0f32, 0.0, 0.0]),
         ([0.5, 0.5], [0.0, 1.0, 0.0]),
         ([-0.5, 0.5], [0.0, 0.0, 1.0]),
     ];
-    let buffer_size = mem::size_of_val(&buffer_data);
-    let buffer = BufferBox::new(
+    BufferBox::upload(
         vk,
-        buffer_size as _,
+        &buffer_data,
         vk::BufferUsageFlags::VERTEX_BUFFER,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    );
-    let memmap = vk
-        .device
-        .map_memory(
-            buffer.memory,
-            0,
-            buffer_size as _,
-            vk::MemoryMapFlags::empty(),
-        )
-        .unwrap();
-    ptr::copy(mem::transmute(buffer_data.as_ptr()), memmap, buffer_size);
-    vk.device.unmap_memory(buffer.memory);
-    buffer
+        command_pool,
+    )
 }
