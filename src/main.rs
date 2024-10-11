@@ -1,11 +1,15 @@
 mod bootstrap;
-mod holders;
+mod math;
+mod vkbox;
 
 use ash::vk;
-use bootstrap::BufferBox;
-use bootstrap::SdlBox;
-use bootstrap::SwapchainBox;
-use bootstrap::VkBox;
+use bootstrap::CommittedBuffer;
+use bootstrap::SdlContext;
+use bootstrap::Swapchain;
+use bootstrap::VkContext;
+use math::vec2;
+use math::vec3;
+use math::Vector;
 use sdl2::event::Event;
 use std::ffi::CStr;
 use std::slice;
@@ -15,37 +19,56 @@ const MAX_CONCURRENT_FRAMES: usize = 2;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
-const VERTEX_DATA: &[([f32; 2], [f32; 3])] = &[
-    // position, color
-    ([0.5f32, -0.5], [1.0f32, 0.0, 0.0]),
-    ([-0.5, -0.5], [0.0, 1.0, 0.0]),
-    ([-0.5, 0.5], [0.0, 1.0, 1.0]),
-    ([0.5, 0.5], [0.0, 0.0, 1.0]),
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Vertex {
+    _pos: vec2,
+    _col: vec3,
+}
+
+const VERTEX_DATA: &[Vertex] = &[
+    Vertex {
+        _pos: Vector([0.5, -0.5]),
+        _col: Vector([1.0, 0.0, 0.0]),
+    },
+    Vertex {
+        _pos: Vector([-0.5, -0.5]),
+        _col: Vector([0.0, 1.0, 0.0]),
+    },
+    Vertex {
+        _pos: Vector([-0.5, 0.5]),
+        _col: Vector([0.0, 1.0, 1.0]),
+    },
+    Vertex {
+        _pos: Vector([0.5, 0.5]),
+        _col: Vector([0.0, 0.0, 1.0]),
+    },
 ];
 const INDEX_DATA: &[u16] = &[0, 1, 2, 0, 2, 3];
 
 fn main() {
     unsafe {
-        let mut sdl = SdlBox::new();
-        let vk = VkBox::new(&sdl);
+        let mut sdl = SdlContext::new();
+        let vk = VkContext::new(&sdl);
 
         let mut swapchain_create_info = vk.physical_device.swapchain_create_info();
-        let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
+        let render_pass = create_render_pass(&vk, swapchain_create_info.image_format);
 
-        let mut swapchain = SwapchainBox::new(&vk, swapchain_create_info, render_pass, None);
-        let pipeline = PipelineBox::new(&vk, render_pass);
+        let mut swapchain = Swapchain::new(&vk, swapchain_create_info, render_pass.0, None);
+        let pipeline = PipelineBox::new(&vk, render_pass.0);
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
-        let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient);
+        let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
 
-        let command_buffers = vk.allocate_command_buffers(command_pool, MAX_CONCURRENT_FRAMES as _);
-        let mut semaphores_image_available = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
-        let mut semaphores_render_finished = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
-        let mut fences_in_flight = [vk::Fence::null(); MAX_CONCURRENT_FRAMES];
-        for i in 0..MAX_CONCURRENT_FRAMES {
-            semaphores_image_available[i] = vk.create_semaphore();
-            semaphores_render_finished[i] = vk.create_semaphore();
-            fences_in_flight[i] = vk.create_fence_signaled();
+        let command_buffers =
+            vk.allocate_command_buffers(command_pool.0, MAX_CONCURRENT_FRAMES as _);
+        let mut semaphores_image_available = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut semaphores_render_finished = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut fences_in_flight = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        for _ in 0..MAX_CONCURRENT_FRAMES {
+            semaphores_image_available.push(vk.create_semaphore());
+            semaphores_render_finished.push(vk.create_semaphore());
+            fences_in_flight.push(vk.create_fence_signaled());
         }
         let mut command_buffer_index = 0;
 
@@ -61,7 +84,7 @@ fn main() {
                         win_event: sdl2::event::WindowEvent::Resized(_, _),
                         ..
                     } => {
-                        swapchain.reinit(&vk, &mut swapchain_create_info, render_pass);
+                        swapchain.reinit(&vk, &mut swapchain_create_info, render_pass.0);
                         continue 'main_loop;
                     }
                     _ => {}
@@ -69,15 +92,15 @@ fn main() {
             }
 
             let cur_command_buffer = command_buffers[command_buffer_index];
-            let cur_fence = fences_in_flight[command_buffer_index];
-            let cur_image_available = semaphores_image_available[command_buffer_index];
-            let cur_render_finished = semaphores_render_finished[command_buffer_index];
+            let cur_fence = fences_in_flight[command_buffer_index].0;
+            let cur_image_available = semaphores_image_available[command_buffer_index].0;
+            let cur_render_finished = semaphores_render_finished[command_buffer_index].0;
 
             vk.device
                 .wait_for_fences(slice::from_ref(&cur_fence), true, u64::MAX)
                 .unwrap();
             let result = vk.device_ext_swapchain.acquire_next_image(
-                swapchain.swapchain,
+                swapchain.swapchain.0,
                 u64::MAX,
                 cur_image_available,
                 vk::Fence::null(),
@@ -85,7 +108,7 @@ fn main() {
             let image_index = match result {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass);
+                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass.0);
                     continue;
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
@@ -100,8 +123,8 @@ fn main() {
                 .unwrap();
             let clear_values = [vk::ClearValue::default()];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(render_pass)
-                .framebuffer(swapchain.framebuffers[image_index as usize])
+                .render_pass(render_pass.0)
+                .framebuffer(swapchain.framebuffers[image_index as usize].0)
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
                     extent: swapchain_create_info.image_extent,
@@ -132,11 +155,15 @@ fn main() {
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.pipeline,
             );
-            vk.device
-                .cmd_bind_vertex_buffers(cur_command_buffer, 0, &[vertex_buffer.buffer], &[0]);
+            vk.device.cmd_bind_vertex_buffers(
+                cur_command_buffer,
+                0,
+                &[vertex_buffer.buffer.0],
+                &[0],
+            );
             vk.device.cmd_bind_index_buffer(
                 cur_command_buffer,
-                index_buffer.buffer,
+                index_buffer.buffer.0,
                 0,
                 vk::IndexType::UINT16,
             );
@@ -146,30 +173,27 @@ fn main() {
             vk.device.end_command_buffer(cur_command_buffer).unwrap();
 
             let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-            let command_buffers = [cur_command_buffer];
             let submit_info = [vk::SubmitInfo::default()
                 .wait_semaphores(slice::from_ref(&cur_image_available))
                 .wait_dst_stage_mask(&wait_stages)
-                .command_buffers(&command_buffers)
+                .command_buffers(slice::from_ref(&cur_command_buffer))
                 .signal_semaphores(slice::from_ref(&cur_render_finished))];
             vk.device.reset_fences(slice::from_ref(&cur_fence)).unwrap();
             vk.device
                 .queue_submit(vk.queue_graphics, &submit_info, cur_fence)
                 .unwrap();
 
-            let swapchains = [swapchain.swapchain];
-            let image_indices = [image_index];
             let present_info = vk::PresentInfoKHR::default()
                 .wait_semaphores(slice::from_ref(&cur_render_finished))
-                .swapchains(&swapchains)
-                .image_indices(&image_indices);
+                .swapchains(slice::from_ref(&swapchain.swapchain.0))
+                .image_indices(slice::from_ref(&image_index));
             match vk
                 .device_ext_swapchain
                 .queue_present(vk.queue_present, &present_info)
             {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass);
+                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass.0);
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
@@ -179,25 +203,11 @@ fn main() {
 
         vk.device.device_wait_idle().unwrap();
 
-        for i in 0..MAX_CONCURRENT_FRAMES {
-            vk.device.destroy_fence(fences_in_flight[i], None);
-            vk.device
-                .destroy_semaphore(semaphores_image_available[i], None);
-            vk.device
-                .destroy_semaphore(semaphores_render_finished[i], None);
-        }
-        vk.device.destroy_command_pool(command_pool_transient, None);
-        vk.device.destroy_command_pool(command_pool, None);
         vk.device.destroy_pipeline(pipeline.pipeline, None);
-        vk.device.destroy_pipeline_layout(pipeline.layout, None);
-        vertex_buffer.destroy(&vk);
-        index_buffer.destroy(&vk);
-        swapchain.destroy(&vk);
-        vk.device.destroy_render_pass(render_pass, None);
     }
 }
 
-unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::RenderPass {
+unsafe fn create_render_pass(vk: &VkContext, format: vk::Format) -> vkbox::RenderPass {
     let attachments = [vk::AttachmentDescription {
         flags: vk::AttachmentDescriptionFlags::empty(),
         format,
@@ -229,28 +239,28 @@ unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::Re
         .attachments(&attachments)
         .subpasses(&subpasses)
         .dependencies(&dependencies);
-    device.create_render_pass(&create_info, None).unwrap()
+    vkbox::RenderPass::new(vk, &create_info)
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct PipelineBox {
+#[derive(Debug)]
+struct PipelineBox<'a> {
+    _layout: vkbox::PipelineLayout<'a>,
     pipeline: vk::Pipeline,
-    layout: vk::PipelineLayout,
 }
 
-impl PipelineBox {
-    unsafe fn new(vk: &VkBox, render_pass: vk::RenderPass) -> Self {
+impl<'a> PipelineBox<'a> {
+    unsafe fn new(vk: &'a VkContext, render_pass: vk::RenderPass) -> Self {
         let shader_module_vert = vk.create_shader_module(BYTECODE_VERT);
         let shader_module_frag = vk.create_shader_module(BYTECODE_FRAG);
 
         let stage_create_infos = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
-                .module(shader_module_vert)
+                .module(shader_module_vert.0)
                 .name(CStr::from_bytes_with_nul(b"main\0").unwrap()),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(shader_module_frag)
+                .module(shader_module_frag.0)
                 .name(CStr::from_bytes_with_nul(b"main\0").unwrap()),
         ];
         let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
@@ -309,10 +319,7 @@ impl PipelineBox {
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let layout_create_info = vk::PipelineLayoutCreateInfo::default();
-        let layout = vk
-            .device
-            .create_pipeline_layout(&layout_create_info, None)
-            .unwrap();
+        let layout = vkbox::PipelineLayout::new(vk, &layout_create_info);
         let pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&stage_create_infos)
             .vertex_input_state(&vertex_input_state)
@@ -322,31 +329,31 @@ impl PipelineBox {
             .multisample_state(&multisample_state)
             .color_blend_state(&color_blend_state)
             .dynamic_state(&dynamic_state_create_info)
-            .layout(layout)
+            .layout(layout.0)
             .render_pass(render_pass)];
         let pipelines = vk
             .device
             .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None)
             .unwrap();
 
-        vk.device.destroy_shader_module(shader_module_frag, None);
-        vk.device.destroy_shader_module(shader_module_vert, None);
-
         Self {
+            _layout: layout,
             pipeline: pipelines[0],
-            layout,
         }
     }
 }
 
-unsafe fn create_mesh(vk: &VkBox, command_pool: vk::CommandPool) -> (BufferBox, BufferBox) {
-    let vertex_buffer = BufferBox::upload(
+unsafe fn create_mesh(
+    vk: &VkContext,
+    command_pool: vk::CommandPool,
+) -> (CommittedBuffer, CommittedBuffer) {
+    let vertex_buffer = CommittedBuffer::upload(
         vk,
         &VERTEX_DATA,
         vk::BufferUsageFlags::VERTEX_BUFFER,
         command_pool,
     );
-    let index_buffer = BufferBox::upload(
+    let index_buffer = CommittedBuffer::upload(
         vk,
         &INDEX_DATA,
         vk::BufferUsageFlags::INDEX_BUFFER,
