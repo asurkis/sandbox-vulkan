@@ -1,12 +1,13 @@
 mod bootstrap;
+mod holders;
 
 use ash::vk;
+use bootstrap::BufferBox;
 use bootstrap::SdlBox;
+use bootstrap::SwapchainBox;
 use bootstrap::VkBox;
 use sdl2::event::Event;
 use std::ffi::CStr;
-use std::mem;
-use std::ptr;
 use std::slice;
 use std::u64;
 
@@ -32,13 +33,12 @@ fn main() {
         let render_pass = create_render_pass(&vk.device, swapchain_create_info.image_format);
 
         let mut swapchain = SwapchainBox::new(&vk, swapchain_create_info, render_pass, None);
-        let pipeline = PipelineBox::new(&vk.device, render_pass);
-        let command_pool = create_command_pool(&vk);
-        let command_pool_transient = create_command_pool_transient(&vk);
+        let pipeline = PipelineBox::new(&vk, render_pass);
+        let command_pool = vk.create_graphics_command_pool();
+        let command_pool_transient = vk.create_graphics_transient_command_pool();
         let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient);
 
-        let command_buffers =
-            allocate_command_buffers(&vk.device, command_pool, MAX_CONCURRENT_FRAMES as _);
+        let command_buffers = vk.allocate_command_buffers(command_pool, MAX_CONCURRENT_FRAMES as _);
         let mut semaphores_image_available = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
         let mut semaphores_render_finished = [vk::Semaphore::null(); MAX_CONCURRENT_FRAMES];
         let mut fences_in_flight = [vk::Fence::null(); MAX_CONCURRENT_FRAMES];
@@ -197,107 +197,6 @@ fn main() {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-struct SwapchainBox {
-    swapchain: vk::SwapchainKHR,
-    image_views: Vec<vk::ImageView>,
-    framebuffers: Vec<vk::Framebuffer>,
-}
-
-impl SwapchainBox {
-    unsafe fn new(
-        vk: &VkBox,
-        mut create_info: vk::SwapchainCreateInfoKHR,
-        render_pass: vk::RenderPass,
-        old_swapchain: Option<Self>,
-    ) -> Self {
-        if let Some(ref st) = old_swapchain {
-            create_info.old_swapchain = st.swapchain;
-            vk.device.device_wait_idle().unwrap();
-        }
-        let swapchain = vk
-            .device_ext_swapchain
-            .create_swapchain(&create_info, None)
-            .unwrap();
-        if let Some(st) = old_swapchain {
-            st.destroy(&vk);
-        }
-        let images = vk
-            .device_ext_swapchain
-            .get_swapchain_images(swapchain)
-            .unwrap();
-        let image_views = create_image_views(&vk.device, &images, create_info.image_format);
-        let framebuffers = create_framebuffers(
-            &vk.device,
-            &image_views,
-            create_info.image_extent,
-            render_pass,
-        );
-        Self {
-            swapchain,
-            image_views,
-            framebuffers,
-        }
-    }
-
-    unsafe fn reinit(
-        &mut self,
-        vk: &VkBox,
-        create_info: &mut vk::SwapchainCreateInfoKHR,
-        render_pass: vk::RenderPass,
-    ) {
-        let capabilities = vk
-            .instance_ext_surface
-            .get_physical_device_surface_capabilities(
-                vk.physical_device.physical_device,
-                vk.physical_device.surface,
-            )
-            .unwrap();
-        create_info.image_extent = capabilities.current_extent;
-        if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
-            return;
-        }
-        let old_self = mem::take(self);
-        *self = Self::new(vk, *create_info, render_pass, Some(old_self));
-    }
-
-    unsafe fn destroy(self, vk: &VkBox) {
-        for framebuffer in self.framebuffers {
-            vk.device.destroy_framebuffer(framebuffer, None);
-        }
-        for image_view in self.image_views {
-            vk.device.destroy_image_view(image_view, None);
-        }
-        // Images are owned by swapchain
-        vk.device_ext_swapchain
-            .destroy_swapchain(self.swapchain, None);
-    }
-}
-
-unsafe fn create_image_views(
-    device: &ash::Device,
-    images: &[vk::Image],
-    format: vk::Format,
-) -> Vec<vk::ImageView> {
-    let mut views = Vec::with_capacity(images.len());
-    for &image in images {
-        let view_create_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-        let view = device.create_image_view(&view_create_info, None).unwrap();
-        views.push(view);
-    }
-    views
-}
-
 unsafe fn create_render_pass(device: &ash::Device, format: vk::Format) -> vk::RenderPass {
     let attachments = [vk::AttachmentDescription {
         flags: vk::AttachmentDescriptionFlags::empty(),
@@ -340,9 +239,9 @@ struct PipelineBox {
 }
 
 impl PipelineBox {
-    unsafe fn new(device: &ash::Device, render_pass: vk::RenderPass) -> Self {
-        let shader_module_vert = create_shader_module(&device, BYTECODE_VERT);
-        let shader_module_frag = create_shader_module(&device, BYTECODE_FRAG);
+    unsafe fn new(vk: &VkBox, render_pass: vk::RenderPass) -> Self {
+        let shader_module_vert = vk.create_shader_module(BYTECODE_VERT);
+        let shader_module_frag = vk.create_shader_module(BYTECODE_FRAG);
 
         let stage_create_infos = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -410,7 +309,8 @@ impl PipelineBox {
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let layout_create_info = vk::PipelineLayoutCreateInfo::default();
-        let layout = device
+        let layout = vk
+            .device
             .create_pipeline_layout(&layout_create_info, None)
             .unwrap();
         let pipeline_create_infos = [vk::GraphicsPipelineCreateInfo::default()
@@ -424,189 +324,18 @@ impl PipelineBox {
             .dynamic_state(&dynamic_state_create_info)
             .layout(layout)
             .render_pass(render_pass)];
-        let pipelines = device
+        let pipelines = vk
+            .device
             .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_create_infos, None)
             .unwrap();
 
-        device.destroy_shader_module(shader_module_frag, None);
-        device.destroy_shader_module(shader_module_vert, None);
+        vk.device.destroy_shader_module(shader_module_frag, None);
+        vk.device.destroy_shader_module(shader_module_vert, None);
 
         Self {
             pipeline: pipelines[0],
             layout,
         }
-    }
-}
-
-unsafe fn create_shader_module(device: &ash::Device, bytecode: &[u8]) -> vk::ShaderModule {
-    let mut code_safe = Vec::with_capacity((bytecode.len() + 3) / 4);
-    for i in (0..bytecode.len()).step_by(4) {
-        let mut arr = [0; 4];
-        for j in i..bytecode.len().min(i + 4) {
-            arr[j - i] = bytecode[j];
-        }
-        let u = u32::from_ne_bytes(arr);
-        code_safe.push(u);
-    }
-    let create_info = vk::ShaderModuleCreateInfo::default().code(&code_safe);
-    device.create_shader_module(&create_info, None).unwrap()
-}
-
-unsafe fn create_framebuffers(
-    device: &ash::Device,
-    image_views: &[vk::ImageView],
-    extent: vk::Extent2D,
-    render_pass: vk::RenderPass,
-) -> Vec<vk::Framebuffer> {
-    let n = image_views.len();
-    let mut framebuffers = Vec::with_capacity(n);
-    for &iv in image_views {
-        let attachments = [iv];
-        let create_info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .attachments(&attachments)
-            .width(extent.width)
-            .height(extent.height)
-            .layers(1);
-        let framebuffer = device.create_framebuffer(&create_info, None).unwrap();
-        framebuffers.push(framebuffer);
-    }
-    framebuffers
-}
-
-unsafe fn create_command_pool(vk: &VkBox) -> vk::CommandPool {
-    let create_info = vk::CommandPoolCreateInfo::default()
-        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-        .queue_family_index(vk.physical_device.queue_family_index_graphics);
-    vk.device.create_command_pool(&create_info, None).unwrap()
-}
-
-unsafe fn create_command_pool_transient(vk: &VkBox) -> vk::CommandPool {
-    let create_info = vk::CommandPoolCreateInfo::default()
-        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-        .queue_family_index(vk.physical_device.queue_family_index_graphics);
-    vk.device.create_command_pool(&create_info, None).unwrap()
-}
-
-unsafe fn allocate_command_buffers(
-    device: &ash::Device,
-    command_pool: vk::CommandPool,
-    count: u32,
-) -> Vec<vk::CommandBuffer> {
-    let allocate_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(count);
-    device.allocate_command_buffers(&allocate_info).unwrap()
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct BufferBox {
-    buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
-}
-
-impl BufferBox {
-    unsafe fn new(
-        vk: &VkBox,
-        size: u64,
-        usage: vk::BufferUsageFlags,
-        memory_property_flags: vk::MemoryPropertyFlags,
-    ) -> Self {
-        let queue_family_indices = [vk.physical_device.queue_family_index_graphics];
-        let create_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .queue_family_indices(&queue_family_indices);
-        let buffer = vk.device.create_buffer(&create_info, None).unwrap();
-
-        let memory_requirements = vk.device.get_buffer_memory_requirements(buffer);
-        let memory_properties = vk
-            .instance
-            .get_physical_device_memory_properties(vk.physical_device.physical_device);
-
-        let mut memory_type_index = u32::MAX;
-        for (i, memory_type) in memory_properties.memory_types_as_slice().iter().enumerate() {
-            if memory_type.property_flags & memory_property_flags != memory_property_flags {
-                continue;
-            }
-            if memory_requirements.memory_type_bits & (1 << i) != 0 {
-                memory_type_index = i as _;
-                break;
-            }
-        }
-        if memory_type_index == u32::MAX {
-            panic!("No appropriate memory type found!");
-        }
-        let allocate_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(memory_requirements.size)
-            .memory_type_index(memory_type_index);
-        let memory = vk.device.allocate_memory(&allocate_info, None).unwrap();
-        vk.device.bind_buffer_memory(buffer, memory, 0).unwrap();
-        Self { buffer, memory }
-    }
-
-    unsafe fn destroy(self, vk: &VkBox) {
-        vk.device.free_memory(self.memory, None);
-        vk.device.destroy_buffer(self.buffer, None);
-    }
-
-    unsafe fn upload<T: Copy>(
-        vk: &VkBox,
-        data: &[T],
-        usage: vk::BufferUsageFlags,
-        command_pool: vk::CommandPool,
-    ) -> Self {
-        let data_size = mem::size_of_val(data);
-        let out = Self::new(
-            vk,
-            data_size as _,
-            usage | vk::BufferUsageFlags::TRANSFER_DST,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        );
-        let staging = Self::new(
-            vk,
-            data_size as _,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        );
-        let memmap = vk
-            .device
-            .map_memory(
-                staging.memory,
-                0,
-                data_size as _,
-                vk::MemoryMapFlags::empty(),
-            )
-            .unwrap();
-        ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
-        vk.device.unmap_memory(staging.memory);
-
-        let command_buffer = allocate_command_buffers(&vk.device, command_pool, 1)[0];
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        vk.device
-            .begin_command_buffer(command_buffer, &begin_info)
-            .unwrap();
-        let regions = [vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
-            size: data_size as _,
-        }];
-        vk.device
-            .cmd_copy_buffer(command_buffer, staging.buffer, out.buffer, &regions);
-        vk.device.end_command_buffer(command_buffer).unwrap();
-
-        let submits = [vk::SubmitInfo::default().command_buffers(slice::from_ref(&command_buffer))];
-        vk.device
-            .queue_submit(vk.queue_graphics, &submits, vk::Fence::null())
-            .unwrap();
-        vk.device.queue_wait_idle(vk.queue_graphics).unwrap();
-        vk.device
-            .free_command_buffers(command_pool, slice::from_ref(&command_buffer));
-        staging.destroy(vk);
-        out
     }
 }
 

@@ -3,7 +3,9 @@ use ash::vk::Handle;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::mem;
 use std::ptr;
+use std::slice;
 
 pub struct SdlBox {
     pub event_pump: sdl2::EventPump,
@@ -32,6 +34,19 @@ pub struct PhysicalDeviceBox {
     pub surface_present_modes: Vec<vk::PresentModeKHR>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct SwapchainBox {
+    pub swapchain: vk::SwapchainKHR,
+    pub image_views: Vec<vk::ImageView>,
+    pub framebuffers: Vec<vk::Framebuffer>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BufferBox {
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+}
+
 impl SdlBox {
     pub fn new() -> Self {
         let system = sdl2::init().unwrap();
@@ -58,8 +73,7 @@ impl VkBox {
             .vulkan_create_surface(instance.handle().as_raw() as _)
             .unwrap();
         let surface = vk::SurfaceKHR::from_raw(surface);
-        let physical_device =
-            PhysicalDeviceBox::new(&instance, &instance_ext_surface, surface);
+        let physical_device = PhysicalDeviceBox::new(&instance, &instance_ext_surface, surface);
         let (device, [queue_graphics, queue_present]) = Self::create_device(
             &instance,
             physical_device.physical_device,
@@ -78,21 +92,6 @@ impl VkBox {
             queue_graphics,
             queue_present,
         }
-    }
-
-    pub unsafe fn create_semaphore(&self) -> vk::Semaphore {
-        let create_info = vk::SemaphoreCreateInfo::default();
-        self.device.create_semaphore(&create_info, None).unwrap()
-    }
-
-    pub unsafe fn create_fence(&self) -> vk::Fence {
-        let create_info = vk::FenceCreateInfo::default();
-        self.device.create_fence(&create_info, None).unwrap()
-    }
-
-    pub unsafe fn create_fence_signaled(&self) -> vk::Fence {
-        let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        self.device.create_fence(&create_info, None).unwrap()
     }
 
     unsafe fn create_instance(
@@ -150,6 +149,97 @@ impl VkBox {
             queues[i] = device.get_device_queue(queue_family_indices[i], 0);
         }
         (device, queues)
+    }
+
+    pub unsafe fn create_semaphore(&self) -> vk::Semaphore {
+        let create_info = vk::SemaphoreCreateInfo::default();
+        self.device.create_semaphore(&create_info, None).unwrap()
+    }
+
+    #[allow(unused)]
+    pub unsafe fn create_fence(&self) -> vk::Fence {
+        let create_info = vk::FenceCreateInfo::default();
+        self.device.create_fence(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_fence_signaled(&self) -> vk::Fence {
+        let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        self.device.create_fence(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_shader_module(&self, bytecode: &[u8]) -> vk::ShaderModule {
+        let mut code_safe = Vec::with_capacity((bytecode.len() + 3) / 4);
+        for i in (0..bytecode.len()).step_by(4) {
+            let mut arr = [0; 4];
+            for j in i..bytecode.len().min(i + 4) {
+                arr[j - i] = bytecode[j];
+            }
+            let u = u32::from_ne_bytes(arr);
+            code_safe.push(u);
+        }
+        let create_info = vk::ShaderModuleCreateInfo::default().code(&code_safe);
+        self.device
+            .create_shader_module(&create_info, None)
+            .unwrap()
+    }
+
+    pub unsafe fn create_image_view(&self, image: vk::Image, format: vk::Format) -> vk::ImageView {
+        let create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        self.device.create_image_view(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_framebuffer(
+        &self,
+        image_view: vk::ImageView,
+        extent: vk::Extent2D,
+        render_pass: vk::RenderPass,
+    ) -> vk::Framebuffer {
+        let attachments = [image_view];
+        let create_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&attachments)
+            .width(extent.width)
+            .height(extent.height)
+            .layers(1);
+        self.device.create_framebuffer(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_graphics_command_pool(&self) -> vk::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(self.physical_device.queue_family_index_graphics);
+        self.device.create_command_pool(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn create_graphics_transient_command_pool(&self) -> vk::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+            .queue_family_index(self.physical_device.queue_family_index_graphics);
+        self.device.create_command_pool(&create_info, None).unwrap()
+    }
+
+    pub unsafe fn allocate_command_buffers(
+        &self,
+        command_pool: vk::CommandPool,
+        count: u32,
+    ) -> Vec<vk::CommandBuffer> {
+        let allocate_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(count);
+        self.device
+            .allocate_command_buffers(&allocate_info)
+            .unwrap()
     }
 }
 
@@ -273,5 +363,180 @@ impl PhysicalDeviceBox {
             }
         }
         swapchain_create_info
+    }
+}
+
+impl SwapchainBox {
+    pub unsafe fn new(
+        vk: &VkBox,
+        mut create_info: vk::SwapchainCreateInfoKHR,
+        render_pass: vk::RenderPass,
+        old_swapchain: Option<Self>,
+    ) -> Self {
+        if let Some(ref st) = old_swapchain {
+            create_info.old_swapchain = st.swapchain;
+            vk.device.device_wait_idle().unwrap();
+        }
+        let swapchain = vk
+            .device_ext_swapchain
+            .create_swapchain(&create_info, None)
+            .unwrap();
+        if let Some(st) = old_swapchain {
+            st.destroy(&vk);
+        }
+        let images = vk
+            .device_ext_swapchain
+            .get_swapchain_images(swapchain)
+            .unwrap();
+        let image_views: Vec<_> = images
+            .iter()
+            .map(|&img| vk.create_image_view(img, create_info.image_format))
+            .collect();
+        let framebuffers: Vec<_> = image_views
+            .iter()
+            .map(|&iv| vk.create_framebuffer(iv, create_info.image_extent, render_pass))
+            .collect();
+        Self {
+            swapchain,
+            image_views,
+            framebuffers,
+        }
+    }
+
+    pub unsafe fn reinit(
+        &mut self,
+        vk: &VkBox,
+        create_info: &mut vk::SwapchainCreateInfoKHR,
+        render_pass: vk::RenderPass,
+    ) {
+        let capabilities = vk
+            .instance_ext_surface
+            .get_physical_device_surface_capabilities(
+                vk.physical_device.physical_device,
+                vk.physical_device.surface,
+            )
+            .unwrap();
+        create_info.image_extent = capabilities.current_extent;
+        if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
+            return;
+        }
+        let old_self = mem::take(self);
+        *self = Self::new(vk, *create_info, render_pass, Some(old_self));
+    }
+
+    pub unsafe fn destroy(self, vk: &VkBox) {
+        for framebuffer in self.framebuffers {
+            vk.device.destroy_framebuffer(framebuffer, None);
+        }
+        for image_view in self.image_views {
+            vk.device.destroy_image_view(image_view, None);
+        }
+        // Images are owned by swapchain
+        vk.device_ext_swapchain
+            .destroy_swapchain(self.swapchain, None);
+    }
+}
+
+impl BufferBox {
+    pub unsafe fn new(
+        vk: &VkBox,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        memory_property_flags: vk::MemoryPropertyFlags,
+    ) -> Self {
+        let queue_family_indices = [vk.physical_device.queue_family_index_graphics];
+        let create_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_family_indices);
+        let buffer = vk.device.create_buffer(&create_info, None).unwrap();
+
+        let memory_requirements = vk.device.get_buffer_memory_requirements(buffer);
+        let memory_properties = vk
+            .instance
+            .get_physical_device_memory_properties(vk.physical_device.physical_device);
+
+        let mut memory_type_index = u32::MAX;
+        for (i, memory_type) in memory_properties.memory_types_as_slice().iter().enumerate() {
+            if memory_type.property_flags & memory_property_flags != memory_property_flags {
+                continue;
+            }
+            if memory_requirements.memory_type_bits & (1 << i) != 0 {
+                memory_type_index = i as _;
+                break;
+            }
+        }
+        if memory_type_index == u32::MAX {
+            panic!("No appropriate memory type found!");
+        }
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_requirements.size)
+            .memory_type_index(memory_type_index);
+        let memory = vk.device.allocate_memory(&allocate_info, None).unwrap();
+        vk.device.bind_buffer_memory(buffer, memory, 0).unwrap();
+        Self { buffer, memory }
+    }
+
+    pub unsafe fn destroy(self, vk: &VkBox) {
+        vk.device.free_memory(self.memory, None);
+        vk.device.destroy_buffer(self.buffer, None);
+    }
+
+    pub unsafe fn upload<T: Copy>(
+        vk: &VkBox,
+        data: &[T],
+        usage: vk::BufferUsageFlags,
+        command_pool: vk::CommandPool,
+    ) -> Self {
+        let data_size = mem::size_of_val(data);
+        let out = Self::new(
+            vk,
+            data_size as _,
+            usage | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+        let staging = Self::new(
+            vk,
+            data_size as _,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        let memmap = vk
+            .device
+            .map_memory(
+                staging.memory,
+                0,
+                data_size as _,
+                vk::MemoryMapFlags::empty(),
+            )
+            .unwrap();
+        ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
+        vk.device.unmap_memory(staging.memory);
+
+        let command_buffer = vk.allocate_command_buffers(command_pool, 1)[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        vk.device
+            .begin_command_buffer(command_buffer, &begin_info)
+            .unwrap();
+        let regions = [vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: data_size as _,
+        }];
+        vk.device
+            .cmd_copy_buffer(command_buffer, staging.buffer, out.buffer, &regions);
+        vk.device.end_command_buffer(command_buffer).unwrap();
+
+        let submits = [vk::SubmitInfo::default().command_buffers(slice::from_ref(&command_buffer))];
+        vk.device
+            .queue_submit(vk.queue_graphics, &submits, vk::Fence::null())
+            .unwrap();
+        vk.device.queue_wait_idle(vk.queue_graphics).unwrap();
+        vk.device
+            .free_command_buffers(command_pool, slice::from_ref(&command_buffer));
+        staging.destroy(vk);
+        out
     }
 }
