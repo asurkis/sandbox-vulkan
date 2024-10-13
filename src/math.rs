@@ -22,6 +22,7 @@ pub trait Scalar:
     + DivAssign
 {
 }
+
 #[derive(Clone, Copy, Debug)]
 pub struct Vector<T: Scalar, const N: usize>(pub [T; N]);
 
@@ -272,6 +273,22 @@ impl<T: Scalar, const N: usize, const M: usize> Matrix<T, N, M> {
     #[allow(unused)]
     pub fn dotv(&self, rhs: Vector<T, M>) -> Vector<T, N> {
         self.dot(&rhs.into()).into()
+    }
+
+    #[allow(unused)]
+    pub fn dot_inplace(&mut self, rhs: &Matrix<T, M, M>) {
+        *self = self.dot(rhs);
+    }
+}
+
+impl<T: Scalar, const N: usize> Matrix<T, N, N> {
+    #[allow(unused)]
+    pub fn transpose_inplace(&mut self) {
+        for col in 0..N {
+            for row in 0..col {
+                (self.0[row][col], self.0[col][row]) = (self.0[col][row], self.0[row][col]);
+            }
+        }
     }
 }
 
