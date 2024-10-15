@@ -1,6 +1,6 @@
 macro_rules! declare_box {
     ($typ:ident, $device:ident, $create_info_ty:ident, $create_fn:ident, $destroy_fn:ident) => {
-        pub struct $typ<'a>(pub ::ash::vk::$typ, &'a crate::bootstrap::VkContext);
+        pub struct $typ<'a>(pub ::ash::vk::$typ, Option<&'a crate::bootstrap::VkContext>);
 
         impl<'a> $typ<'a> {
             #[allow(unused)]
@@ -8,24 +8,33 @@ macro_rules! declare_box {
                 vk: &'a crate::bootstrap::VkContext,
                 create_info: &::ash::vk::$create_info_ty,
             ) -> Self {
-                Self(vk.$device.$create_fn(create_info, None).unwrap(), vk)
+                Self(vk.$device.$create_fn(create_info, None).unwrap(), Some(vk))
             }
 
             #[allow(unused)]
             pub fn wrap(vk: &'a crate::bootstrap::VkContext, x: ::ash::vk::$typ) -> Self {
-                Self(x, vk)
+                Self(x, Some(vk))
             }
 
             #[allow(unused)]
-            pub fn null(vk: &'a crate::bootstrap::VkContext) -> Self {
-                Self(::ash::vk::$typ::null(), vk)
+            pub fn null() -> Self {
+                Self(::ash::vk::$typ::null(), None)
+            }
+        }
+
+        impl Default for $typ<'_> {
+            fn default() -> Self {
+                Self::null()
             }
         }
 
         impl Drop for $typ<'_> {
             fn drop(&mut self) {
-                unsafe {
-                    self.1.$device.$destroy_fn(self.0, None);
+                match self.1 {
+                    Some(vk) => unsafe {
+                        vk.$device.$destroy_fn(self.0, None);
+                    },
+                    None => {}
                 }
             }
         }
@@ -53,6 +62,7 @@ declare_box!(
     create_buffer,
     destroy_buffer
 );
+declare_box!(Image, device, ImageCreateInfo, create_image, destroy_image);
 declare_box!(
     CommandPool,
     device,

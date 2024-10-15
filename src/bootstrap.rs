@@ -36,14 +36,14 @@ pub struct PhysicalDeviceContext {
     pub surface_present_modes: Vec<vk::PresentModeKHR>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
     pub _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CommittedBuffer<'a> {
     pub buffer: vkbox::Buffer<'a>,
     pub memory: vkbox::DeviceMemory<'a>,
@@ -151,6 +151,38 @@ impl VkContext {
             queues[i] = device.get_device_queue(queue_family_indices[i], 0);
         }
         (device, queues)
+    }
+
+    pub unsafe fn find_memory_type(
+        &self,
+        memory_requirements: vk::MemoryRequirements,
+        memory_property_flags: vk::MemoryPropertyFlags,
+    ) -> u32 {
+        let memory_properties = self
+            .instance
+            .get_physical_device_memory_properties(self.physical_device.physical_device);
+
+        for (i, memory_type) in memory_properties.memory_types_as_slice().iter().enumerate() {
+            if memory_type.property_flags & memory_property_flags != memory_property_flags {
+                continue;
+            }
+            if memory_requirements.memory_type_bits & (1 << i) != 0 {
+                return i as _;
+            }
+        }
+        panic!("No appropriate memory type found!");
+    }
+
+    pub unsafe fn allocate_memory(
+        &self,
+        memory_requirements: vk::MemoryRequirements,
+        memory_property_flags: vk::MemoryPropertyFlags,
+    ) -> vkbox::DeviceMemory {
+        let memory_type_index = self.find_memory_type(memory_requirements, memory_property_flags);
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(memory_requirements.size)
+            .memory_type_index(memory_type_index);
+        vkbox::DeviceMemory::new(self, &allocate_info)
     }
 
     #[allow(unused)]
@@ -439,27 +471,7 @@ impl<'a> CommittedBuffer<'a> {
         let buffer = vkbox::Buffer::new(vk, &create_info);
 
         let memory_requirements = vk.device.get_buffer_memory_requirements(buffer.0);
-        let memory_properties = vk
-            .instance
-            .get_physical_device_memory_properties(vk.physical_device.physical_device);
-
-        let mut memory_type_index = u32::MAX;
-        for (i, memory_type) in memory_properties.memory_types_as_slice().iter().enumerate() {
-            if memory_type.property_flags & memory_property_flags != memory_property_flags {
-                continue;
-            }
-            if memory_requirements.memory_type_bits & (1 << i) != 0 {
-                memory_type_index = i as _;
-                break;
-            }
-        }
-        if memory_type_index == u32::MAX {
-            panic!("No appropriate memory type found!");
-        }
-        let allocate_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(memory_requirements.size)
-            .memory_type_index(memory_type_index);
-        let memory = vkbox::DeviceMemory::new(vk, &allocate_info);
+        let memory = vk.allocate_memory(memory_requirements, memory_property_flags);
         vk.device.bind_buffer_memory(buffer.0, memory.0, 0).unwrap();
         Self { buffer, memory }
     }
@@ -477,23 +489,7 @@ impl<'a> CommittedBuffer<'a> {
             usage | vk::BufferUsageFlags::TRANSFER_DST,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         );
-        let staging = Self::new(
-            vk,
-            data_size as _,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        );
-        let memmap = vk
-            .device
-            .map_memory(
-                staging.memory.0,
-                0,
-                data_size as _,
-                vk::MemoryMapFlags::empty(),
-            )
-            .unwrap();
-        ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
-        vk.device.unmap_memory(staging.memory.0);
+        let staging = Self::new_staging(vk, data);
 
         let command_buffer = vk.allocate_command_buffers(command_pool, 1)[0];
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -518,5 +514,27 @@ impl<'a> CommittedBuffer<'a> {
         vk.device
             .free_command_buffers(command_pool, slice::from_ref(&command_buffer));
         out
+    }
+
+    pub unsafe fn new_staging<T: Copy>(vk: &'a VkContext, data: &[T]) -> Self {
+        let data_size = mem::size_of_val(data);
+        let staging = Self::new(
+            vk,
+            data_size as _,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        let memmap = vk
+            .device
+            .map_memory(
+                staging.memory.0,
+                0,
+                data_size as _,
+                vk::MemoryMapFlags::empty(),
+            )
+            .unwrap();
+        ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
+        vk.device.unmap_memory(staging.memory.0);
+        staging
     }
 }
