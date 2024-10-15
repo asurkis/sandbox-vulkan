@@ -7,8 +7,10 @@ use bootstrap::CommittedBuffer;
 use bootstrap::SdlContext;
 use bootstrap::Swapchain;
 use bootstrap::VkContext;
+use math::mat4;
 use math::vec2;
 use math::vec3;
+use math::Matrix;
 use math::Vector;
 use sdl2::event::Event;
 use std::ffi::CStr;
@@ -25,34 +27,50 @@ const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag
 
 #[derive(Clone, Copy, Debug, Default)]
 struct UniformData {
-    shift: vec2,
+    mat_view: mat4,
+    mat_proj: mat4,
+    mat_view_proj: mat4,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Vertex {
-    _pos: vec2,
-    _col: vec3,
+    pos: vec3,
 }
 
 const VERTEX_DATA: &[Vertex] = &[
     Vertex {
-        _pos: Vector([0.5, -0.5]),
-        _col: Vector([1.0, 0.0, 0.0]),
+        pos: Vector([-1.0, -1.0, -1.0]),
     },
     Vertex {
-        _pos: Vector([-0.5, -0.5]),
-        _col: Vector([0.0, 1.0, 0.0]),
+        pos: Vector([-1.0, -1.0, 1.0]),
     },
     Vertex {
-        _pos: Vector([-0.5, 0.5]),
-        _col: Vector([0.0, 1.0, 1.0]),
+        pos: Vector([-1.0, 1.0, -1.0]),
     },
     Vertex {
-        _pos: Vector([0.5, 0.5]),
-        _col: Vector([0.0, 0.0, 1.0]),
+        pos: Vector([-1.0, 1.0, 1.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, -1.0, -1.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, -1.0, 1.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, 1.0, -1.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, 1.0, 1.0]),
     },
 ];
-const INDEX_DATA: &[u16] = &[0, 1, 2, 0, 2, 3];
+const INDEX_DATA: &[u16] = &[
+    0, 1, 3, 3, 2, 0, // -x
+    4, 6, 7, 7, 5, 4, // +x
+    0, 4, 5, 5, 1, 0, // -y
+    2, 3, 7, 7, 6, 2, // +y
+    0, 2, 6, 6, 4, 0, // -z
+    1, 5, 7, 7, 3, 1, // +z
+];
 
 fn main() {
     unsafe {
@@ -68,9 +86,7 @@ fn main() {
         let command_pool_transient = vk.create_graphics_transient_command_pool();
         let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
 
-        let mut uniform_data = UniformData {
-            shift: Vector::default(),
-        };
+        let mut uniform_data = UniformData::default();
         let uniform_data_size = mem::size_of_val(&uniform_data);
 
         let command_buffers =
@@ -134,9 +150,45 @@ fn main() {
             }
 
             let time_elapsed = time::Instant::now() - loop_start_instant;
-            let angle = std::f64::consts::PI * 2.0 * time_elapsed.subsec_millis() as f64 / 1000.0;
+            let nanos = time_elapsed.as_secs() * 1_000_000_000 + time_elapsed.subsec_nanos() as u64;
+            let angle = std::f32::consts::PI * nanos as f32 / 1e9;
             let (sin, cos) = angle.sin_cos();
-            uniform_data.shift = Vector([cos as _, sin as _]) * 0.5;
+
+            let cam_pos = Vector([3.0 * sin, 2.0, 3.0 * cos]);
+            let look_at = Vector([0.0; 3]);
+            let world_up = Vector([0.0, 1.0, 0.0]);
+            let cam_forward = (look_at - cam_pos).normalize();
+            let cam_right = cam_forward.cross(world_up).normalize();
+            let cam_up = cam_right.cross(cam_forward);
+
+            let mut mat_transform = mat4::identity();
+            mat_transform.0[3][0] = -cam_pos.x();
+            mat_transform.0[3][1] = -cam_pos.y();
+            mat_transform.0[3][2] = -cam_pos.z();
+
+            uniform_data.mat_view.0[0][0] = cam_right.x();
+            uniform_data.mat_view.0[1][0] = cam_right.y();
+            uniform_data.mat_view.0[2][0] = cam_right.z();
+            uniform_data.mat_view.0[3][0] = 0.0;
+            uniform_data.mat_view.0[0][1] = cam_up.x();
+            uniform_data.mat_view.0[1][1] = cam_up.y();
+            uniform_data.mat_view.0[2][1] = cam_up.z();
+            uniform_data.mat_view.0[3][1] = 0.0;
+            uniform_data.mat_view.0[0][2] = cam_forward.x();
+            uniform_data.mat_view.0[1][2] = cam_forward.y();
+            uniform_data.mat_view.0[2][2] = cam_forward.z();
+            uniform_data.mat_view.0[3][2] = 0.0;
+            uniform_data.mat_view.0[0][3] = 0.0;
+            uniform_data.mat_view.0[1][3] = 0.0;
+            uniform_data.mat_view.0[2][3] = 0.0;
+            uniform_data.mat_view.0[3][3] = 1.0;
+            uniform_data.mat_view.dot_assign(&mat_transform);
+
+            uniform_data.mat_proj = mat4::identity();
+            uniform_data.mat_proj.0[0][0] = swapchain_create_info.image_extent.height as f32 / swapchain_create_info.image_extent.width as f32;
+            uniform_data.mat_proj.0[1][1] = -1.0;
+            uniform_data.mat_proj.0[2][3] = 1.0;
+            uniform_data.mat_view_proj = uniform_data.mat_proj.dot(&uniform_data.mat_view);
 
             let cur_command_buffer = command_buffers[command_buffer_index];
             let cur_uniform_mapping = uniform_mappings[command_buffer_index];
@@ -176,7 +228,11 @@ fn main() {
             vk.device
                 .begin_command_buffer(cur_command_buffer, &begin_info)
                 .unwrap();
-            let clear_values = [vk::ClearValue::default()];
+            let clear_values = [vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [1.0, 0.75, 0.5, 0.0],
+                },
+            }];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.0)
                 .framebuffer(swapchain.framebuffers[image_index as usize].0)
@@ -231,7 +287,7 @@ fn main() {
                 &[],
             );
             vk.device
-                .cmd_draw_indexed(cur_command_buffer, 6, 1, 0, 0, 0);
+                .cmd_draw_indexed(cur_command_buffer, INDEX_DATA.len() as _, 1, 0, 0, 0);
             vk.device.cmd_end_render_pass(cur_command_buffer);
             vk.device.end_command_buffer(cur_command_buffer).unwrap();
 
@@ -329,23 +385,15 @@ impl<'a> PipelineBox<'a> {
         ];
         let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
             binding: 0,
-            stride: 20,
+            stride: mem::size_of::<Vertex>() as _,
             input_rate: vk::VertexInputRate::VERTEX,
         }];
-        let vertex_attribute_descriptions = [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: 0,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: 8,
-            },
-        ];
+        let vertex_attribute_descriptions = [vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: mem::offset_of!(Vertex, pos) as _,
+        }];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding_descriptions)
             .vertex_attribute_descriptions(&vertex_attribute_descriptions);

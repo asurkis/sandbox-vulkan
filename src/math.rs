@@ -132,6 +132,33 @@ macro_rules! impl_op_assign {
     };
 }
 
+macro_rules! impl_fty {
+    ($fty:ty) => {
+        impl<const N: usize> Vector<$fty, N> {
+            #[allow(unused)]
+            pub fn length(self) -> $fty {
+                self.dot(self).sqrt()
+            }
+
+            #[allow(unused)]
+            pub fn normalize(self) -> Self {
+                self / self.length()
+            }
+        }
+
+        impl<const N: usize> Matrix<$fty, N, N> {
+            #[allow(unused)]
+            pub fn identity() -> Self {
+                let mut out = Self::default();
+                for i in 0..N {
+                    out.0[i][i] = 1.0;
+                }
+                out
+            }
+        }
+    };
+}
+
 impl_scalar_op!(Add, add);
 impl_scalar_op!(Mul, mul);
 impl_scalar_op!(Sub, sub);
@@ -146,6 +173,9 @@ impl_op_assign!(AddAssign, add_assign);
 impl_op_assign!(SubAssign, sub_assign);
 impl_op_assign!(MulAssign, mul_assign);
 impl_op_assign!(DivAssign, div_assign);
+
+impl_fty!(f32);
+impl_fty!(f64);
 
 impl<T: Scalar, const N: usize> Default for Vector<T, N> {
     fn default() -> Self {
@@ -276,7 +306,7 @@ impl<T: Scalar, const N: usize, const M: usize> Matrix<T, N, M> {
     }
 
     #[allow(unused)]
-    pub fn dot_inplace(&mut self, rhs: &Matrix<T, M, M>) {
+    pub fn dot_assign(&mut self, rhs: &Matrix<T, M, M>) {
         *self = self.dot(rhs);
     }
 }
