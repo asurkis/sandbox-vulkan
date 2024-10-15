@@ -8,9 +8,7 @@ use bootstrap::SdlContext;
 use bootstrap::Swapchain;
 use bootstrap::VkContext;
 use math::mat4;
-use math::vec2;
 use math::vec3;
-use math::Matrix;
 use math::Vector;
 use sdl2::event::Event;
 use std::ffi::CStr;
@@ -63,6 +61,7 @@ const VERTEX_DATA: &[Vertex] = &[
         pos: Vector([1.0, 1.0, 1.0]),
     },
 ];
+
 const INDEX_DATA: &[u16] = &[
     0, 1, 3, 3, 2, 0, // -x
     4, 6, 7, 7, 5, 4, // +x
@@ -185,7 +184,8 @@ fn main() {
             uniform_data.mat_view.dot_assign(&mat_transform);
 
             uniform_data.mat_proj = mat4::identity();
-            uniform_data.mat_proj.0[0][0] = swapchain_create_info.image_extent.height as f32 / swapchain_create_info.image_extent.width as f32;
+            uniform_data.mat_proj.0[0][0] = swapchain_create_info.image_extent.height as f32
+                / swapchain_create_info.image_extent.width as f32;
             uniform_data.mat_proj.0[1][1] = -1.0;
             uniform_data.mat_proj.0[2][3] = 1.0;
             uniform_data.mat_view_proj = uniform_data.mat_proj.dot(&uniform_data.mat_view);
