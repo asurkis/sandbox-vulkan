@@ -4,6 +4,7 @@ mod vkbox;
 
 use ash::vk;
 use bootstrap::CommittedBuffer;
+use bootstrap::CommittedImage;
 use bootstrap::SdlContext;
 use bootstrap::Swapchain;
 use bootstrap::VkContext;
@@ -84,6 +85,15 @@ fn main() {
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
         let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
+        let _texture = CommittedImage::upload(
+            &vk,
+            command_pool_transient.0,
+            vk::Extent2D {
+                width: 1,
+                height: 1,
+            },
+            &[0, 0, 0, 0],
+        );
 
         let mut uniform_data = UniformData::default();
         let uniform_data_size = mem::size_of_val(&uniform_data);
@@ -126,7 +136,7 @@ fn main() {
             &uniform_buffers,
         );
 
-        let mut command_buffer_index = 0;
+        let mut frame_in_flight_index = 0;
 
         let loop_start_instant = time::Instant::now();
         'main_loop: loop {
@@ -190,12 +200,12 @@ fn main() {
             uniform_data.mat_proj.0[2][3] = 1.0;
             uniform_data.mat_view_proj = uniform_data.mat_proj.dot(&uniform_data.mat_view);
 
-            let cur_command_buffer = command_buffers[command_buffer_index];
-            let cur_uniform_mapping = uniform_mappings[command_buffer_index];
-            let cur_fence = fences_in_flight[command_buffer_index].0;
-            let cur_image_available = semaphores_image_available[command_buffer_index].0;
-            let cur_render_finished = semaphores_render_finished[command_buffer_index].0;
-            let cur_descriptor_set = descriptor_sets[command_buffer_index];
+            let cur_command_buffer = command_buffers[frame_in_flight_index];
+            let cur_uniform_mapping = uniform_mappings[frame_in_flight_index];
+            let cur_fence = fences_in_flight[frame_in_flight_index].0;
+            let cur_image_available = semaphores_image_available[frame_in_flight_index].0;
+            let cur_render_finished = semaphores_render_finished[frame_in_flight_index].0;
+            let cur_descriptor_set = descriptor_sets[frame_in_flight_index];
 
             ptr::copy(
                 mem::transmute(&uniform_data as *const _),
@@ -317,7 +327,7 @@ fn main() {
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
 
-            command_buffer_index = (command_buffer_index + 1) % MAX_CONCURRENT_FRAMES;
+            frame_in_flight_index = (frame_in_flight_index + 1) % MAX_CONCURRENT_FRAMES;
         }
 
         vk.device.device_wait_idle().unwrap();
@@ -514,15 +524,15 @@ unsafe fn create_mesh(
 ) -> (CommittedBuffer, CommittedBuffer) {
     let vertex_buffer = CommittedBuffer::upload(
         vk,
+        command_pool,
         &VERTEX_DATA,
         vk::BufferUsageFlags::VERTEX_BUFFER,
-        command_pool,
     );
     let index_buffer = CommittedBuffer::upload(
         vk,
+        command_pool,
         &INDEX_DATA,
         vk::BufferUsageFlags::INDEX_BUFFER,
-        command_pool,
     );
     (vertex_buffer, index_buffer)
 }

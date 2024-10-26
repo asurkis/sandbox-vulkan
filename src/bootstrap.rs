@@ -5,7 +5,6 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
-use std::slice;
 
 use crate::vkbox;
 
@@ -43,10 +42,22 @@ pub struct Swapchain<'a> {
     pub swapchain: vkbox::SwapchainKHR<'a>,
 }
 
+pub struct TransientGraphicsCommandBuffer<'a> {
+    pub buffer: vk::CommandBuffer,
+    pub command_pool: vk::CommandPool,
+    vk: &'a VkContext,
+}
+
 #[derive(Debug, Default)]
 pub struct CommittedBuffer<'a> {
     pub buffer: vkbox::Buffer<'a>,
     pub memory: vkbox::DeviceMemory<'a>,
+}
+
+#[derive(Debug, Default)]
+pub struct CommittedImage<'a> {
+    pub image: vkbox::Image<'a>,
+    pub _memory: vkbox::DeviceMemory<'a>,
 }
 
 impl SdlContext {
@@ -455,6 +466,42 @@ impl<'a> Swapchain<'a> {
     }
 }
 
+impl<'a> TransientGraphicsCommandBuffer<'a> {
+    pub unsafe fn begin(vk: &'a VkContext, command_pool: vk::CommandPool) -> Self {
+        let buffer = vk.allocate_command_buffers(command_pool, 1)[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        vk.device.begin_command_buffer(buffer, &begin_info).unwrap();
+        Self {
+            buffer,
+            command_pool,
+            vk,
+        }
+    }
+}
+
+impl<'a> Drop for TransientGraphicsCommandBuffer<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.vk.device.end_command_buffer(self.buffer).unwrap();
+
+            let buffers = [self.buffer];
+            let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
+            self.vk
+                .device
+                .queue_submit(self.vk.queue_graphics, &submits, vk::Fence::null())
+                .unwrap();
+            self.vk
+                .device
+                .queue_wait_idle(self.vk.queue_graphics)
+                .unwrap();
+            self.vk
+                .device
+                .free_command_buffers(self.command_pool, &buffers);
+        }
+    }
+}
+
 impl<'a> CommittedBuffer<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
@@ -474,46 +521,6 @@ impl<'a> CommittedBuffer<'a> {
         let memory = vk.allocate_memory(memory_requirements, memory_property_flags);
         vk.device.bind_buffer_memory(buffer.0, memory.0, 0).unwrap();
         Self { buffer, memory }
-    }
-
-    pub unsafe fn upload<T: Copy>(
-        vk: &'a VkContext,
-        data: &[T],
-        usage: vk::BufferUsageFlags,
-        command_pool: vk::CommandPool,
-    ) -> Self {
-        let data_size = mem::size_of_val(data);
-        let out = Self::new(
-            vk,
-            data_size as _,
-            usage | vk::BufferUsageFlags::TRANSFER_DST,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        );
-        let staging = Self::new_staging(vk, data);
-
-        let command_buffer = vk.allocate_command_buffers(command_pool, 1)[0];
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        vk.device
-            .begin_command_buffer(command_buffer, &begin_info)
-            .unwrap();
-        let regions = [vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
-            size: data_size as _,
-        }];
-        vk.device
-            .cmd_copy_buffer(command_buffer, staging.buffer.0, out.buffer.0, &regions);
-        vk.device.end_command_buffer(command_buffer).unwrap();
-
-        let submits = [vk::SubmitInfo::default().command_buffers(slice::from_ref(&command_buffer))];
-        vk.device
-            .queue_submit(vk.queue_graphics, &submits, vk::Fence::null())
-            .unwrap();
-        vk.device.queue_wait_idle(vk.queue_graphics).unwrap();
-        vk.device
-            .free_command_buffers(command_pool, slice::from_ref(&command_buffer));
-        out
     }
 
     pub unsafe fn new_staging<T: Copy>(vk: &'a VkContext, data: &[T]) -> Self {
@@ -536,5 +543,145 @@ impl<'a> CommittedBuffer<'a> {
         ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
         vk.device.unmap_memory(staging.memory.0);
         staging
+    }
+
+    pub unsafe fn upload<T: Copy>(
+        vk: &'a VkContext,
+        command_pool: vk::CommandPool,
+        data: &[T],
+        usage: vk::BufferUsageFlags,
+    ) -> Self {
+        let data_size = mem::size_of_val(data);
+        let out = Self::new(
+            vk,
+            data_size as _,
+            usage | vk::BufferUsageFlags::TRANSFER_DST,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        );
+        let staging = Self::new_staging(vk, data);
+
+        let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
+        let regions = [vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: data_size as _,
+        }];
+        vk.device.cmd_copy_buffer(
+            command_buffer.buffer,
+            staging.buffer.0,
+            out.buffer.0,
+            &regions,
+        );
+
+        out
+    }
+}
+
+impl<'a> CommittedImage<'a> {
+    pub unsafe fn new(vk: &'a VkContext, extent: vk::Extent2D) -> Self {
+        let queue_family_indices = [vk.physical_device.queue_family_index_graphics];
+        let create_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_SRGB)
+            .extent(extent.into())
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .queue_family_indices(&queue_family_indices)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = vkbox::Image::new(vk, &create_info);
+
+        let memory_requirements = vk.device.get_image_memory_requirements(image.0);
+        let memory = vk.allocate_memory(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        vk.device.bind_image_memory(image.0, memory.0, 0).unwrap();
+        Self { image, _memory: memory }
+    }
+
+    pub unsafe fn upload(
+        vk: &'a VkContext,
+        command_pool: vk::CommandPool,
+        extent: vk::Extent2D,
+        srgb: &[u8],
+    ) -> Self {
+        assert_eq!(srgb.len() as u32, 4 * extent.width * extent.height);
+        let staging = CommittedBuffer::new_staging(vk, srgb);
+        let out = Self::new(vk, extent);
+
+        let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
+
+        let image_memory_barriers = [vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(out.image.0)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })];
+        vk.device.cmd_pipeline_barrier(
+            command_buffer.buffer,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &image_memory_barriers,
+        );
+
+        let regions = [vk::BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image_subresource: vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
+            image_extent: extent.into(),
+        }];
+        vk.device.cmd_copy_buffer_to_image(
+            command_buffer.buffer,
+            staging.buffer.0,
+            out.image.0,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &regions,
+        );
+
+        let image_memory_barriers = [vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(out.image.0)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })];
+        vk.device.cmd_pipeline_barrier(
+            command_buffer.buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &image_memory_barriers,
+        );
+        out
     }
 }
