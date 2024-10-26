@@ -597,7 +597,10 @@ impl<'a> CommittedImage<'a> {
         let memory_requirements = vk.device.get_image_memory_requirements(image.0);
         let memory = vk.allocate_memory(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL);
         vk.device.bind_image_memory(image.0, memory.0, 0).unwrap();
-        Self { image, _memory: memory }
+        Self {
+            image,
+            _memory: memory,
+        }
     }
 
     pub unsafe fn upload(

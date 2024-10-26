@@ -8,7 +8,9 @@ use bootstrap::CommittedImage;
 use bootstrap::SdlContext;
 use bootstrap::Swapchain;
 use bootstrap::VkContext;
+use image::EncodableLayout;
 use math::mat4;
+use math::vec2;
 use math::vec3;
 use math::Vector;
 use sdl2::event::Event;
@@ -34,8 +36,10 @@ struct UniformData {
 #[derive(Clone, Copy, Debug, Default)]
 struct Vertex {
     pos: vec3,
+    texcoord: vec2,
 }
 
+/*
 const VERTEX_DATA: &[Vertex] = &[
     Vertex {
         pos: Vector([-1.0, -1.0, -1.0]),
@@ -71,6 +75,26 @@ const INDEX_DATA: &[u16] = &[
     0, 2, 6, 6, 4, 0, // -z
     1, 5, 7, 7, 3, 1, // +z
 ];
+*/
+const VERTEX_DATA: &[Vertex] = &[
+    Vertex {
+        pos: Vector([-1.0, 0.0, -1.0]),
+        texcoord: Vector([0.0, 0.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, 0.0, -1.0]),
+        texcoord: Vector([1.0, 0.0]),
+    },
+    Vertex {
+        pos: Vector([-1.0, 0.0, 1.0]),
+        texcoord: Vector([0.0, 1.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, 0.0, 1.0]),
+        texcoord: Vector([1.0, 1.0]),
+    },
+];
+const INDEX_DATA: &[u16] = &[0, 2, 3, 3, 1, 0];
 
 fn main() {
     unsafe {
@@ -85,14 +109,53 @@ fn main() {
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
         let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
-        let _texture = CommittedImage::upload(
+
+        let texture_data = image::ImageReader::open("texture.jpg")
+            .unwrap()
+            .decode()
+            .unwrap()
+            .to_rgba8();
+        let texture = CommittedImage::upload(
             &vk,
             command_pool_transient.0,
             vk::Extent2D {
-                width: 1,
-                height: 1,
+                width: texture_data.width(),
+                height: texture_data.height(),
             },
-            &[0, 0, 0, 0],
+            &texture_data.as_bytes(),
+        );
+        let texture_view = vkbox::ImageView::new(
+            &vk,
+            &vk::ImageViewCreateInfo::default()
+                .image(texture.image.0)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_SRGB)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                }),
+        );
+        let texture_sampler = vkbox::Sampler::new(
+            &vk,
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                .mip_lod_bias(0.0)
+                .anisotropy_enable(false)
+                .max_anisotropy(1.0)
+                .compare_enable(false)
+                .compare_op(vk::CompareOp::NEVER)
+                .min_lod(0.0)
+                .max_lod(0.0)
+                .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+                .unnormalized_coordinates(false),
         );
 
         let mut uniform_data = UniformData::default();
@@ -133,6 +196,8 @@ fn main() {
             &vk,
             descriptor_pool.0,
             pipeline.descriptor_set_layout.0,
+            texture_sampler.0,
+            texture_view.0,
             &uniform_buffers,
         );
 
@@ -160,10 +225,10 @@ fn main() {
 
             let time_elapsed = time::Instant::now() - loop_start_instant;
             let nanos = time_elapsed.as_secs() * 1_000_000_000 + time_elapsed.subsec_nanos() as u64;
-            let angle = std::f32::consts::PI * nanos as f32 / 1e9;
+            let angle = std::f32::consts::PI * nanos as f32 / 3e9;
             let (sin, cos) = angle.sin_cos();
 
-            let cam_pos = Vector([3.0 * sin, 2.0, 3.0 * cos]);
+            let cam_pos = Vector([sin, 1.0, cos]);
             let look_at = Vector([0.0; 3]);
             let world_up = Vector([0.0, 1.0, 0.0]);
             let cam_forward = (look_at - cam_pos).normalize();
@@ -398,12 +463,20 @@ impl<'a> PipelineBox<'a> {
             stride: mem::size_of::<Vertex>() as _,
             input_rate: vk::VertexInputRate::VERTEX,
         }];
-        let vertex_attribute_descriptions = [vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: mem::offset_of!(Vertex, pos) as _,
-        }];
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: mem::offset_of!(Vertex, pos) as _,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: mem::offset_of!(Vertex, texcoord) as _,
+            },
+        ];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding_descriptions)
             .vertex_attribute_descriptions(&vertex_attribute_descriptions);
@@ -440,11 +513,18 @@ impl<'a> PipelineBox<'a> {
         let dynamic_state_create_info =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        let bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)];
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        ];
         let descriptor_set_layout_create_info =
             vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         let descriptor_set_layout =
@@ -478,10 +558,16 @@ impl<'a> PipelineBox<'a> {
 }
 
 unsafe fn create_descriptor_pool(vk: &VkContext) -> vkbox::DescriptorPool {
-    let pool_sizes = [vk::DescriptorPoolSize {
-        ty: vk::DescriptorType::UNIFORM_BUFFER,
-        descriptor_count: MAX_CONCURRENT_FRAMES as _,
-    }];
+    let pool_sizes = [
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: MAX_CONCURRENT_FRAMES as _,
+        },
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: MAX_CONCURRENT_FRAMES as _,
+        },
+    ];
     let create_info = vk::DescriptorPoolCreateInfo::default()
         .flags(vk::DescriptorPoolCreateFlags::empty())
         .max_sets(MAX_CONCURRENT_FRAMES as _)
@@ -493,6 +579,8 @@ unsafe fn create_descriptor_sets(
     vk: &VkContext,
     descriptor_pool: vk::DescriptorPool,
     layout: vk::DescriptorSetLayout,
+    texture_sampler: vk::Sampler,
+    texture_view: vk::ImageView,
     uniform_buffers: &[CommittedBuffer],
 ) -> Vec<vk::DescriptorSet> {
     let set_layouts = [layout; MAX_CONCURRENT_FRAMES];
@@ -506,14 +594,26 @@ unsafe fn create_descriptor_sets(
             offset: 0,
             range: mem::size_of::<UniformData>() as _,
         }];
-        let descriptor_write = vk::WriteDescriptorSet::default()
-            .dst_set(sets[i])
-            .dst_binding(0)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(&buffer_info);
-        vk.device
-            .update_descriptor_sets(slice::from_ref(&descriptor_write), &[]);
+        let image_info = [vk::DescriptorImageInfo {
+            sampler: texture_sampler,
+            image_view: texture_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }];
+        let descriptor_writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(sets[i])
+                .dst_binding(0)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&buffer_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(sets[i])
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_info),
+        ];
+        vk.device.update_descriptor_sets(&descriptor_writes, &[]);
     }
     sets
 }

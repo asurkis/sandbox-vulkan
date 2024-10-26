@@ -1,5 +1,6 @@
 macro_rules! declare_box {
     ($typ:ident, $device:ident, $create_info_ty:ident, $create_fn:ident, $destroy_fn:ident) => {
+        #[derive(Default)]
         pub struct $typ<'a>(pub ::ash::vk::$typ, Option<&'a crate::bootstrap::VkContext>);
 
         impl<'a> $typ<'a> {
@@ -19,12 +20,6 @@ macro_rules! declare_box {
             #[allow(unused)]
             pub fn null() -> Self {
                 Self(::ash::vk::$typ::null(), None)
-            }
-        }
-
-        impl Default for $typ<'_> {
-            fn default() -> Self {
-                Self::null()
             }
         }
 
@@ -118,6 +113,13 @@ declare_box!(
     DescriptorPoolCreateInfo,
     create_descriptor_pool,
     destroy_descriptor_pool
+);
+declare_box!(
+    Sampler,
+    device,
+    SamplerCreateInfo,
+    create_sampler,
+    destroy_sampler
 );
 
 declare_box!(
