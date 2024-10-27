@@ -3,8 +3,8 @@ mod math;
 mod vkbox;
 
 use ash::vk;
+use ash::vk::BufferUsageFlags;
 use bootstrap::CommittedBuffer;
-use bootstrap::CommittedDepthBuffer;
 use bootstrap::CommittedImage;
 use bootstrap::SdlContext;
 use bootstrap::Swapchain;
@@ -40,82 +40,6 @@ struct Vertex {
     texcoord: vec2,
 }
 
-/*
-const VERTEX_DATA: &[Vertex] = &[
-    Vertex {
-        pos: Vector([-1.0, -1.0, -1.0]),
-    },
-    Vertex {
-        pos: Vector([-1.0, -1.0, 1.0]),
-    },
-    Vertex {
-        pos: Vector([-1.0, 1.0, -1.0]),
-    },
-    Vertex {
-        pos: Vector([-1.0, 1.0, 1.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, -1.0, -1.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, -1.0, 1.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, 1.0, -1.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, 1.0, 1.0]),
-    },
-];
-
-const INDEX_DATA: &[u16] = &[
-    0, 1, 3, 3, 2, 0, // -x
-    4, 6, 7, 7, 5, 4, // +x
-    0, 4, 5, 5, 1, 0, // -y
-    2, 3, 7, 7, 6, 2, // +y
-    0, 2, 6, 6, 4, 0, // -z
-    1, 5, 7, 7, 3, 1, // +z
-];
-*/
-const VERTEX_DATA: &[Vertex] = &[
-    Vertex {
-        pos: Vector([-1.0, -1.0, -1.0]),
-        texcoord: Vector([0.0, 0.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, -1.0, -1.0]),
-        texcoord: Vector([1.0, 0.0]),
-    },
-    Vertex {
-        pos: Vector([-1.0, -1.0, 1.0]),
-        texcoord: Vector([0.0, 1.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, -1.0, 1.0]),
-        texcoord: Vector([1.0, 1.0]),
-    },
-    Vertex {
-        pos: Vector([-1.0, 1.0, -1.0]),
-        texcoord: Vector([0.0, 0.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, 1.0, -1.0]),
-        texcoord: Vector([1.0, 0.0]),
-    },
-    Vertex {
-        pos: Vector([-1.0, 1.0, 1.0]),
-        texcoord: Vector([0.0, 1.0]),
-    },
-    Vertex {
-        pos: Vector([1.0, 1.0, 1.0]),
-        texcoord: Vector([1.0, 1.0]),
-    },
-];
-const INDEX_DATA: &[u16] = &[
-    4, 6, 7, 7, 5, 4, // +y
-    0, 2, 3, 3, 1, 0, // -y
-];
-
 fn main() {
     unsafe {
         let mut sdl = SdlContext::new();
@@ -144,9 +68,42 @@ fn main() {
             None,
         );
         let pipeline = PipelineBox::new(&vk, render_pass.0);
-        let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
 
-        let texture_data = image::ImageReader::open("texture.jpg")
+        let (meshes, _) = tobj::load_obj(
+            "assets/viking_room.obj",
+            &tobj::LoadOptions {
+                ignore_lines: true,
+                single_index: true,
+                triangulate: true,
+                ignore_points: true,
+            },
+        )
+        .unwrap();
+        let mesh = &meshes[0].mesh;
+        let n_indices = mesh.indices.len();
+        let n_vertices = mesh.positions.len() / 3;
+        let mut vertex_buffer_data = Vec::with_capacity(n_vertices);
+        for i in 0..n_vertices {
+            vertex_buffer_data.push(Vertex {
+                pos: Vector(mesh.positions[3 * i..3 * i + 3].try_into().unwrap()),
+                texcoord: Vector(mesh.texcoords[2 * i..2 * i + 2].try_into().unwrap()),
+            });
+        }
+        let index_buffer = CommittedBuffer::upload(
+            &vk,
+            command_pool_transient.0,
+            &mesh.indices,
+            BufferUsageFlags::INDEX_BUFFER,
+        );
+        let vertex_buffer = CommittedBuffer::upload(
+            &vk,
+            command_pool_transient.0,
+            &vertex_buffer_data,
+            BufferUsageFlags::VERTEX_BUFFER,
+        );
+        let _ = meshes;
+
+        let texture_data = image::ImageReader::open("assets/viking_room.png")
             .unwrap()
             .decode()
             .unwrap()
@@ -243,7 +200,7 @@ fn main() {
             let angle = std::f32::consts::PI * nanos as f32 / 3e9;
             let (sin, cos) = angle.sin_cos();
 
-            let cam_pos = Vector([sin, 2.0, cos]);
+            let cam_pos = Vector([sin, 1.0, cos]);
             let look_at = Vector([0.0; 3]);
             let world_up = Vector([0.0, 1.0, 0.0]);
             let cam_forward = (look_at - cam_pos).normalize();
@@ -380,7 +337,7 @@ fn main() {
                 cur_command_buffer,
                 index_buffer.buffer.0,
                 0,
-                vk::IndexType::UINT16,
+                vk::IndexType::UINT32,
             );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
@@ -391,7 +348,7 @@ fn main() {
                 &[],
             );
             vk.device
-                .cmd_draw_indexed(cur_command_buffer, INDEX_DATA.len() as _, 1, 0, 0, 0);
+                .cmd_draw_indexed(cur_command_buffer, n_indices as _, 1, 0, 0, 0);
             vk.device.cmd_end_render_pass(cur_command_buffer);
             vk.device.end_command_buffer(cur_command_buffer).unwrap();
 
@@ -684,23 +641,4 @@ unsafe fn create_descriptor_sets(
         vk.device.update_descriptor_sets(&descriptor_writes, &[]);
     }
     sets
-}
-
-unsafe fn create_mesh(
-    vk: &VkContext,
-    command_pool: vk::CommandPool,
-) -> (CommittedBuffer, CommittedBuffer) {
-    let vertex_buffer = CommittedBuffer::upload(
-        vk,
-        command_pool,
-        &VERTEX_DATA,
-        vk::BufferUsageFlags::VERTEX_BUFFER,
-    );
-    let index_buffer = CommittedBuffer::upload(
-        vk,
-        command_pool,
-        &INDEX_DATA,
-        vk::BufferUsageFlags::INDEX_BUFFER,
-    );
-    (vertex_buffer, index_buffer)
 }
