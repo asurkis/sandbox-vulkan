@@ -4,6 +4,7 @@ mod vkbox;
 
 use ash::vk;
 use bootstrap::CommittedBuffer;
+use bootstrap::CommittedDepthBuffer;
 use bootstrap::CommittedImage;
 use bootstrap::SdlContext;
 use bootstrap::Swapchain;
@@ -78,36 +79,71 @@ const INDEX_DATA: &[u16] = &[
 */
 const VERTEX_DATA: &[Vertex] = &[
     Vertex {
-        pos: Vector([-1.0, 0.0, -1.0]),
+        pos: Vector([-1.0, -1.0, -1.0]),
         texcoord: Vector([0.0, 0.0]),
     },
     Vertex {
-        pos: Vector([1.0, 0.0, -1.0]),
+        pos: Vector([1.0, -1.0, -1.0]),
         texcoord: Vector([1.0, 0.0]),
     },
     Vertex {
-        pos: Vector([-1.0, 0.0, 1.0]),
+        pos: Vector([-1.0, -1.0, 1.0]),
         texcoord: Vector([0.0, 1.0]),
     },
     Vertex {
-        pos: Vector([1.0, 0.0, 1.0]),
+        pos: Vector([1.0, -1.0, 1.0]),
+        texcoord: Vector([1.0, 1.0]),
+    },
+    Vertex {
+        pos: Vector([-1.0, 1.0, -1.0]),
+        texcoord: Vector([0.0, 0.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, 1.0, -1.0]),
+        texcoord: Vector([1.0, 0.0]),
+    },
+    Vertex {
+        pos: Vector([-1.0, 1.0, 1.0]),
+        texcoord: Vector([0.0, 1.0]),
+    },
+    Vertex {
+        pos: Vector([1.0, 1.0, 1.0]),
         texcoord: Vector([1.0, 1.0]),
     },
 ];
-const INDEX_DATA: &[u16] = &[0, 2, 3, 3, 1, 0];
+const INDEX_DATA: &[u16] = &[
+    4, 6, 7, 7, 5, 4, // +y
+    0, 2, 3, 3, 1, 0, // -y
+];
 
 fn main() {
     unsafe {
         let mut sdl = SdlContext::new();
         let vk = VkContext::new(&sdl);
 
-        let mut swapchain_create_info = vk.physical_device.swapchain_create_info();
-        let render_pass = create_render_pass(&vk, swapchain_create_info.image_format);
-
-        let mut swapchain = Swapchain::new(&vk, swapchain_create_info, render_pass.0, None);
-        let pipeline = PipelineBox::new(&vk, render_pass.0);
+        let depth_buffer_format = vk.select_image_format(
+            &[
+                vk::Format::D32_SFLOAT,
+                vk::Format::D32_SFLOAT_S8_UINT,
+                vk::Format::D24_UNORM_S8_UINT,
+            ],
+            vk::ImageTiling::OPTIMAL,
+            vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT,
+        );
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
+        let mut swapchain_create_info = vk.physical_device.swapchain_create_info();
+        let render_pass =
+            create_render_pass(&vk, swapchain_create_info.image_format, depth_buffer_format);
+        let mut swapchain = Swapchain::new(
+            &vk,
+            command_pool_transient.0,
+            swapchain_create_info,
+            depth_buffer_format,
+            render_pass.0,
+            None,
+        );
+        let pipeline = PipelineBox::new(&vk, render_pass.0);
         let (vertex_buffer, index_buffer) = create_mesh(&vk, command_pool_transient.0);
 
         let texture_data = image::ImageReader::open("texture.jpg")
@@ -124,39 +160,12 @@ fn main() {
             },
             &texture_data.as_bytes(),
         );
-        let texture_view = vkbox::ImageView::new(
-            &vk,
-            &vk::ImageViewCreateInfo::default()
-                .image(texture.image.0)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(vk::Format::R8G8B8A8_SRGB)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                }),
+        let texture_view = vk.create_image_view(
+            texture.image.0,
+            texture.create_info.format,
+            vk::ImageAspectFlags::COLOR,
         );
-        let texture_sampler = vkbox::Sampler::new(
-            &vk,
-            &vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                .mip_lod_bias(0.0)
-                .anisotropy_enable(false)
-                .max_anisotropy(1.0)
-                .compare_enable(false)
-                .compare_op(vk::CompareOp::NEVER)
-                .min_lod(0.0)
-                .max_lod(0.0)
-                .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-                .unnormalized_coordinates(false),
-        );
+        let texture_sampler = vk.create_sampler();
 
         let mut uniform_data = UniformData::default();
         let uniform_data_size = mem::size_of_val(&uniform_data);
@@ -216,7 +225,13 @@ fn main() {
                         win_event: sdl2::event::WindowEvent::Resized(_, _),
                         ..
                     } => {
-                        swapchain.reinit(&vk, &mut swapchain_create_info, render_pass.0);
+                        swapchain.reinit(
+                            &vk,
+                            command_pool_transient.0,
+                            &mut swapchain_create_info,
+                            depth_buffer_format,
+                            render_pass.0,
+                        );
                         continue 'main_loop;
                     }
                     _ => {}
@@ -228,7 +243,7 @@ fn main() {
             let angle = std::f32::consts::PI * nanos as f32 / 3e9;
             let (sin, cos) = angle.sin_cos();
 
-            let cam_pos = Vector([sin, 1.0, cos]);
+            let cam_pos = Vector([sin, 2.0, cos]);
             let look_at = Vector([0.0; 3]);
             let world_up = Vector([0.0, 1.0, 0.0]);
             let cam_forward = (look_at - cam_pos).normalize();
@@ -290,7 +305,13 @@ fn main() {
             let image_index = match result {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass.0);
+                    swapchain.reinit(
+                        &vk,
+                        command_pool_transient.0,
+                        &mut swapchain_create_info,
+                        depth_buffer_format,
+                        render_pass.0,
+                    );
                     continue;
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
@@ -303,11 +324,19 @@ fn main() {
             vk.device
                 .begin_command_buffer(cur_command_buffer, &begin_info)
                 .unwrap();
-            let clear_values = [vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [1.0, 0.75, 0.5, 0.0],
+            let clear_values = [
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [1.0, 0.75, 0.5, 0.0],
+                    },
                 },
-            }];
+                vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                },
+            ];
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.0)
                 .framebuffer(swapchain.framebuffers[image_index as usize].0)
@@ -387,7 +416,13 @@ fn main() {
             {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain.reinit(&vk, &mut swapchain_create_info, render_pass.0);
+                    swapchain.reinit(
+                        &vk,
+                        command_pool_transient.0,
+                        &mut swapchain_create_info,
+                        depth_buffer_format,
+                        render_pass.0,
+                    );
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
@@ -401,32 +436,57 @@ fn main() {
     }
 }
 
-unsafe fn create_render_pass(vk: &VkContext, format: vk::Format) -> vkbox::RenderPass {
-    let attachments = [vk::AttachmentDescription {
-        flags: vk::AttachmentDescriptionFlags::empty(),
-        format,
-        samples: vk::SampleCountFlags::TYPE_1,
-        load_op: vk::AttachmentLoadOp::CLEAR,
-        store_op: vk::AttachmentStoreOp::STORE,
-        stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-        stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-        initial_layout: vk::ImageLayout::UNDEFINED,
-        final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-    }];
+unsafe fn create_render_pass(
+    vk: &VkContext,
+    display_format: vk::Format,
+    depth_buffer_format: vk::Format,
+) -> vkbox::RenderPass {
+    let attachments = [
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: display_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+        },
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: depth_buffer_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            stencil_load_op: vk::AttachmentLoadOp::CLEAR,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+    ];
     let color_attachments = [vk::AttachmentReference {
         attachment: 0,
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
     }];
+    let depth_stencil_attachment = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
     let subpasses = [vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_attachments)];
+        .color_attachments(&color_attachments)
+        .depth_stencil_attachment(&depth_stencil_attachment)];
     let dependencies = [vk::SubpassDependency {
         src_subpass: vk::SUBPASS_EXTERNAL,
         dst_subpass: 0,
-        src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-        src_access_mask: vk::AccessFlags::empty(),
-        dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+        dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+            | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
         dependency_flags: vk::DependencyFlags::empty(),
     }];
     let create_info = vk::RenderPassCreateInfo::default()
@@ -507,6 +567,13 @@ impl<'a> PipelineBox<'a> {
                 | vk::ColorComponentFlags::G
                 | vk::ColorComponentFlags::R,
         }];
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
+            .flags(vk::PipelineDepthStencilStateCreateFlags::empty())
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
@@ -540,6 +607,7 @@ impl<'a> PipelineBox<'a> {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization_state)
             .multisample_state(&multisample_state)
+            .depth_stencil_state(&depth_stencil_state)
             .color_blend_state(&color_blend_state)
             .dynamic_state(&dynamic_state_create_info)
             .layout(layout.0)

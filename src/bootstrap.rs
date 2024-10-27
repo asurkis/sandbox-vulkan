@@ -3,6 +3,7 @@ use ash::vk::Handle;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 
@@ -38,13 +39,14 @@ pub struct PhysicalDeviceContext {
 #[derive(Debug, Default)]
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
+    pub depth_buffer: CommittedDepthBuffer<'a>,
     pub _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
 }
 
 pub struct TransientGraphicsCommandBuffer<'a> {
     pub buffer: vk::CommandBuffer,
-    pub command_pool: vk::CommandPool,
+    pub pool: vk::CommandPool,
     vk: &'a VkContext,
 }
 
@@ -58,6 +60,13 @@ pub struct CommittedBuffer<'a> {
 pub struct CommittedImage<'a> {
     pub image: vkbox::Image<'a>,
     pub _memory: vkbox::DeviceMemory<'a>,
+    pub create_info: vk::ImageCreateInfo<'static>,
+}
+
+#[derive(Debug, Default)]
+pub struct CommittedDepthBuffer<'a> {
+    pub backend: CommittedImage<'a>,
+    pub view: vkbox::ImageView<'a>,
 }
 
 impl SdlContext {
@@ -144,16 +153,18 @@ impl VkContext {
         queue_family_indices: [u32; N],
     ) -> (ash::Device, [vk::Queue; N]) {
         let queue_priority = [1.0];
-        let mut device_queue_create_infos = [vk::DeviceQueueCreateInfo::default(); N];
+        let mut queue_create_infos = [vk::DeviceQueueCreateInfo::default(); N];
         for i in 0..N {
-            device_queue_create_infos[i] = vk::DeviceQueueCreateInfo::default()
+            queue_create_infos[i] = vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(queue_family_indices[i])
                 .queue_priorities(&queue_priority);
         }
-        let device_extensions_raw = [ash::khr::swapchain::NAME.as_ptr()];
+        let enabled_extension_names_raw = [ash::khr::swapchain::NAME.as_ptr()];
+        let enabled_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
         let device_create_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&device_queue_create_infos)
-            .enabled_extension_names(&device_extensions_raw);
+            .queue_create_infos(&queue_create_infos)
+            .enabled_extension_names(&enabled_extension_names_raw)
+            .enabled_features(&enabled_features);
         let device = instance
             .create_device(physical_device, &device_create_info, None)
             .unwrap();
@@ -162,6 +173,29 @@ impl VkContext {
             queues[i] = device.get_device_queue(queue_family_indices[i], 0);
         }
         (device, queues)
+    }
+
+    pub unsafe fn select_image_format(
+        &self,
+        candidates: &[vk::Format],
+        tiling: vk::ImageTiling,
+        features: vk::FormatFeatureFlags,
+    ) -> vk::Format {
+        for &format in candidates {
+            let props = self.instance.get_physical_device_format_properties(
+                self.physical_device.physical_device,
+                format,
+            );
+            let found_features = match tiling {
+                vk::ImageTiling::LINEAR => props.linear_tiling_features,
+                vk::ImageTiling::OPTIMAL => props.optimal_tiling_features,
+                _ => panic!("Unexpected tiling: {tiling:?}"),
+            };
+            if found_features & features == features {
+                return format;
+            }
+        }
+        panic!("No fitting format found");
     }
 
     pub unsafe fn find_memory_type(
@@ -212,6 +246,29 @@ impl VkContext {
         vkbox::Semaphore::new(self, &create_info)
     }
 
+    pub unsafe fn create_sampler(&self) -> vkbox::Sampler {
+        let physical_device_properties = self
+            .instance
+            .get_physical_device_properties(self.physical_device.physical_device);
+        let create_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .mip_lod_bias(0.0)
+            .anisotropy_enable(true)
+            .max_anisotropy(physical_device_properties.limits.max_sampler_anisotropy)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::NEVER)
+            .min_lod(0.0)
+            .max_lod(0.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false);
+        vkbox::Sampler::new(self, &create_info)
+    }
+
     pub unsafe fn create_shader_module(&self, bytecode: &[u8]) -> vkbox::ShaderModule {
         let mut code_safe = Vec::with_capacity((bytecode.len() + 3) / 4);
         for i in (0..bytecode.len()).step_by(4) {
@@ -230,13 +287,14 @@ impl VkContext {
         &self,
         image: vk::Image,
         format: vk::Format,
+        aspect_mask: vk::ImageAspectFlags,
     ) -> vkbox::ImageView {
         let create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(format)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
@@ -247,14 +305,13 @@ impl VkContext {
 
     pub unsafe fn create_framebuffer(
         &self,
-        image_view: vk::ImageView,
+        attachments: &[vk::ImageView],
         extent: vk::Extent2D,
         render_pass: vk::RenderPass,
     ) -> vkbox::Framebuffer {
-        let attachments = [image_view];
         let create_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
-            .attachments(&attachments)
+            .attachments(attachments)
             .width(extent.width)
             .height(extent.height)
             .layers(1);
@@ -313,6 +370,11 @@ impl PhysicalDeviceContext {
             info.surface = surface;
             info.physical_device = pd;
 
+            let device_features = instance.get_physical_device_features(pd);
+            if device_features.sampler_anisotropy == 0 {
+                continue;
+            }
+
             let mut required_extensions = HashSet::new();
             required_extensions.insert(ash::khr::swapchain::NAME);
             let extension_properties = instance.enumerate_device_extension_properties(pd).unwrap();
@@ -328,7 +390,9 @@ impl PhysicalDeviceContext {
             let mut has_present = false;
             for i in 0..queue_family_properties.len() {
                 let prop = queue_family_properties[i];
-                if prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                let graphics_flags =
+                    vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER;
+                if prop.queue_flags & graphics_flags == graphics_flags {
                     has_graphics = true;
                     info.queue_family_index_graphics = i as _;
                 }
@@ -416,7 +480,9 @@ impl PhysicalDeviceContext {
 impl<'a> Swapchain<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
+        command_pool: vk::CommandPool,
         mut create_info: vk::SwapchainCreateInfoKHR,
+        depth_buffer_format: vk::Format,
         render_pass: vk::RenderPass,
         old_swapchain: Option<&Self>,
     ) -> Self {
@@ -431,14 +497,29 @@ impl<'a> Swapchain<'a> {
             .unwrap();
         let image_views: Vec<_> = images
             .iter()
-            .map(|&img| vk.create_image_view(img, create_info.image_format))
+            .map(|&img| {
+                vk.create_image_view(img, create_info.image_format, vk::ImageAspectFlags::COLOR)
+            })
             .collect();
+        let depth_buffer = CommittedDepthBuffer::new(
+            vk,
+            command_pool,
+            depth_buffer_format,
+            create_info.image_extent,
+        );
         let framebuffers: Vec<_> = image_views
             .iter()
-            .map(|iv| vk.create_framebuffer(iv.0, create_info.image_extent, render_pass))
+            .map(|iv| {
+                vk.create_framebuffer(
+                    &[iv.0, depth_buffer.view.0],
+                    create_info.image_extent,
+                    render_pass,
+                )
+            })
             .collect();
         Self {
             framebuffers,
+            depth_buffer,
             _image_views: image_views,
             swapchain,
         }
@@ -447,7 +528,9 @@ impl<'a> Swapchain<'a> {
     pub unsafe fn reinit(
         &mut self,
         vk: &'a VkContext,
+        command_pool: vk::CommandPool,
         create_info: &mut vk::SwapchainCreateInfoKHR,
+        depth_buffer_format: vk::Format,
         render_pass: vk::RenderPass,
     ) {
         let capabilities = vk
@@ -461,22 +544,25 @@ impl<'a> Swapchain<'a> {
         if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
             return;
         }
-        let mut new = Self::new(vk, *create_info, render_pass, Some(self));
+        let mut new = Self::new(
+            vk,
+            command_pool,
+            *create_info,
+            depth_buffer_format,
+            render_pass,
+            Some(self),
+        );
         mem::swap(self, &mut new);
     }
 }
 
 impl<'a> TransientGraphicsCommandBuffer<'a> {
-    pub unsafe fn begin(vk: &'a VkContext, command_pool: vk::CommandPool) -> Self {
-        let buffer = vk.allocate_command_buffers(command_pool, 1)[0];
+    pub unsafe fn begin(vk: &'a VkContext, pool: vk::CommandPool) -> Self {
+        let buffer = vk.allocate_command_buffers(pool, 1)[0];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         vk.device.begin_command_buffer(buffer, &begin_info).unwrap();
-        Self {
-            buffer,
-            command_pool,
-            vk,
-        }
+        Self { buffer, pool, vk }
     }
 }
 
@@ -495,9 +581,7 @@ impl<'a> Drop for TransientGraphicsCommandBuffer<'a> {
                 .device
                 .queue_wait_idle(self.vk.queue_graphics)
                 .unwrap();
-            self.vk
-                .device
-                .free_command_buffers(self.command_pool, &buffers);
+            self.vk.device.free_command_buffers(self.pool, &buffers);
         }
     }
 }
@@ -578,28 +662,38 @@ impl<'a> CommittedBuffer<'a> {
 }
 
 impl<'a> CommittedImage<'a> {
-    pub unsafe fn new(vk: &'a VkContext, extent: vk::Extent2D) -> Self {
+    pub unsafe fn new(
+        vk: &'a VkContext,
+        format: vk::Format,
+        extent: vk::Extent2D,
+        usage: vk::ImageUsageFlags,
+    ) -> Self {
         let queue_family_indices = [vk.physical_device.queue_family_index_graphics];
         let create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8G8B8A8_SRGB)
+            .format(format)
             .extent(extent.into())
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .queue_family_indices(&queue_family_indices)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = vkbox::Image::new(vk, &create_info);
-
         let memory_requirements = vk.device.get_image_memory_requirements(image.0);
         let memory = vk.allocate_memory(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL);
         vk.device.bind_image_memory(image.0, memory.0, 0).unwrap();
         Self {
             image,
             _memory: memory,
+            create_info: vk::ImageCreateInfo {
+                queue_family_index_count: 0,
+                p_queue_family_indices: ptr::null(),
+                _marker: PhantomData,
+                ..create_info
+            },
         }
     }
 
@@ -611,7 +705,12 @@ impl<'a> CommittedImage<'a> {
     ) -> Self {
         assert_eq!(srgb.len() as u32, 4 * extent.width * extent.height);
         let staging = CommittedBuffer::new_staging(vk, srgb);
-        let out = Self::new(vk, extent);
+        let out = Self::new(
+            vk,
+            vk::Format::R8G8B8A8_UNORM,
+            extent,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        );
 
         let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
 
@@ -686,5 +785,62 @@ impl<'a> CommittedImage<'a> {
             &image_memory_barriers,
         );
         out
+    }
+}
+
+impl<'a> CommittedDepthBuffer<'a> {
+    pub unsafe fn new(
+        vk: &'a VkContext,
+        command_pool: vk::CommandPool,
+        format: vk::Format,
+        extent: vk::Extent2D,
+    ) -> Self {
+        let has_stencil_component =
+            vk::Format::D32_SFLOAT_S8_UINT == format || vk::Format::D24_UNORM_S8_UINT == format;
+        let backend = CommittedImage::new(
+            &vk,
+            format,
+            extent,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+        );
+        let view = vk.create_image_view(backend.image.0, format, vk::ImageAspectFlags::DEPTH);
+
+        let aspect_mask = vk::ImageAspectFlags::DEPTH
+            | if has_stencil_component {
+                vk::ImageAspectFlags::STENCIL
+            } else {
+                vk::ImageAspectFlags::empty()
+            };
+
+        let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
+        let image_memory_barriers = [vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(backend.image.0)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })];
+        vk.device.cmd_pipeline_barrier(
+            command_buffer.buffer,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &image_memory_barriers,
+        );
+
+        Self { backend, view }
     }
 }
