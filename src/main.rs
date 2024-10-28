@@ -97,6 +97,27 @@ fn main() {
         );
         let pipeline = PipelineBox::new(&vk, render_pass.0, msaa_sample_count);
 
+        let mut imgui = imgui::Context::create();
+        imgui.set_ini_filename(None);
+        let mut imgui_sdl = imgui_sdl2_support::SdlPlatform::new(&mut imgui);
+        let mut imgui_renderer = imgui_rs_vulkan_renderer::Renderer::with_default_allocator(
+            &vk.instance,
+            vk.physical_device.physical_device,
+            vk.device.clone(),
+            vk.queue_graphics,
+            command_pool.0,
+            render_pass.0,
+            &mut imgui,
+            Some(imgui_rs_vulkan_renderer::Options {
+                in_flight_frames: MAX_CONCURRENT_FRAMES,
+                enable_depth_test: false,
+                enable_depth_write: false,
+                subpass: 0,
+                sample_count: msaa_sample_count,
+            }),
+        )
+        .unwrap();
+
         let (meshes, _) = tobj::load_obj(
             "assets/viking_room.obj",
             &tobj::LoadOptions {
@@ -199,9 +220,16 @@ fn main() {
 
         let mut frame_in_flight_index = 0;
 
-        let loop_start_instant = time::Instant::now();
+        let mut time_prev = time::Instant::now();
+        let mut angle = 0.0f32;
+        let mut turn_speed = 0.0;
+
         'main_loop: loop {
+            imgui_sdl.prepare_frame(&mut imgui, &sdl.window, &sdl.event_pump);
             for evt in sdl.event_pump.poll_iter() {
+                if !imgui_sdl.handle_event(&mut imgui, &evt) {
+                    continue;
+                }
                 match evt {
                     Event::Quit { .. }
                     | Event::KeyDown {
@@ -226,9 +254,26 @@ fn main() {
                 }
             }
 
-            let time_elapsed = time::Instant::now() - loop_start_instant;
+            let time_curr = time::Instant::now();
+
+            let ui = imgui.new_frame();
+            ui.window("Info").build(|| {
+                ui.slider("Turn speed", -1.0, 1.0, &mut turn_speed);
+                ui.text(format!("Current angle: {:3.02}", angle.to_degrees()));
+            });
+
+            let time_elapsed = time_curr - time_prev;
             let nanos = time_elapsed.as_secs() * 1_000_000_000 + time_elapsed.subsec_nanos() as u64;
-            let angle = std::f32::consts::PI * nanos as f32 / 3e9;
+            let angle_delta = 2.0e-9 * std::f32::consts::PI * nanos as f32;
+            angle += turn_speed * angle_delta;
+            if angle > std::f32::consts::PI {
+                angle -= 2.0 * std::f32::consts::PI;
+            }
+            if angle < -std::f32::consts::PI {
+                angle += 2.0 * std::f32::consts::PI;
+            }
+            time_prev = time_curr;
+
             let (sin, cos) = angle.sin_cos();
 
             let cam_pos = Vector([sin, 1.0, cos]);
@@ -236,7 +281,7 @@ fn main() {
             let world_up = Vector([0.0, 1.0, 0.0]);
             let cam_forward = (look_at - cam_pos).normalize();
             let cam_right = cam_forward.cross(world_up).normalize();
-            let cam_up = cam_right.cross(cam_forward);
+            let cam_down = cam_forward.cross(cam_right);
 
             let mut mat_transform = mat4::identity();
             mat_transform.0[3][0] = -cam_pos.x();
@@ -247,9 +292,9 @@ fn main() {
             uniform_data.mat_view.0[1][0] = cam_right.y();
             uniform_data.mat_view.0[2][0] = cam_right.z();
             uniform_data.mat_view.0[3][0] = 0.0;
-            uniform_data.mat_view.0[0][1] = cam_up.x();
-            uniform_data.mat_view.0[1][1] = cam_up.y();
-            uniform_data.mat_view.0[2][1] = cam_up.z();
+            uniform_data.mat_view.0[0][1] = cam_down.x();
+            uniform_data.mat_view.0[1][1] = cam_down.y();
+            uniform_data.mat_view.0[2][1] = cam_down.z();
             uniform_data.mat_view.0[3][1] = 0.0;
             uniform_data.mat_view.0[0][2] = cam_forward.x();
             uniform_data.mat_view.0[1][2] = cam_forward.y();
@@ -264,7 +309,6 @@ fn main() {
             uniform_data.mat_proj = mat4::identity();
             uniform_data.mat_proj.0[0][0] = swapchain_create_info.image_extent.height as f32
                 / swapchain_create_info.image_extent.width as f32;
-            uniform_data.mat_proj.0[1][1] = -1.0;
             uniform_data.mat_proj.0[2][3] = 1.0;
             uniform_data.mat_view_proj = uniform_data.mat_proj.dot(&uniform_data.mat_view);
 
@@ -381,6 +425,11 @@ fn main() {
             );
             vk.device
                 .cmd_draw_indexed(cur_command_buffer, n_indices as _, 1, 0, 0, 0);
+
+            imgui_renderer
+                .cmd_draw(cur_command_buffer, imgui.render())
+                .unwrap();
+
             vk.device.cmd_end_render_pass(cur_command_buffer);
             vk.device.end_command_buffer(cur_command_buffer).unwrap();
 

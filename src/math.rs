@@ -5,6 +5,7 @@ use std::ops::Div;
 use std::ops::DivAssign;
 use std::ops::Mul;
 use std::ops::MulAssign;
+use std::ops::Neg;
 use std::ops::Sub;
 use std::ops::SubAssign;
 
@@ -159,6 +160,16 @@ macro_rules! impl_fty {
     };
 }
 
+impl<T: Scalar + Neg<Output = T>, const N: usize> Neg for Vector<T, N> {
+    type Output = Self;
+    fn neg(mut self) -> Self {
+        for i in 0..N {
+            self.0[i] = -self.0[i];
+        }
+        self
+    }
+}
+
 impl_scalar_op!(Add, add);
 impl_scalar_op!(Mul, mul);
 impl_scalar_op!(Sub, sub);
@@ -264,7 +275,7 @@ impl<T: Scalar> Vector<T, 3> {
         Self([
             self.y() * rhs.z() - self.z() * rhs.y(),
             self.z() * rhs.x() - self.x() * rhs.z(),
-            self.x() * rhs.y() - self.y() * rhs.z(),
+            self.x() * rhs.y() - self.y() * rhs.x(),
         ])
     }
 }

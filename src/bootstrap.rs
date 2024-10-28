@@ -13,6 +13,7 @@ pub struct SdlContext {
     pub window: sdl2::video::Window,
 }
 
+#[derive(Clone)]
 pub struct VkContext {
     pub instance: ash::Instance,
     pub instance_ext_surface: ash::khr::surface::Instance,
