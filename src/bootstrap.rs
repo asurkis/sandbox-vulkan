@@ -39,7 +39,7 @@ pub struct PhysicalDeviceContext {
 #[derive(Debug, Default)]
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
-    pub depth_buffer: CommittedDepthBuffer<'a>,
+    pub _depth_buffer: CommittedImage<'a>,
     pub _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
 }
@@ -59,14 +59,8 @@ pub struct CommittedBuffer<'a> {
 #[derive(Debug, Default)]
 pub struct CommittedImage<'a> {
     pub image: vkbox::Image<'a>,
-    pub _memory: vkbox::DeviceMemory<'a>,
-    pub create_info: vk::ImageCreateInfo<'static>,
-}
-
-#[derive(Debug, Default)]
-pub struct CommittedDepthBuffer<'a> {
-    pub backend: CommittedImage<'a>,
     pub view: vkbox::ImageView<'a>,
+    pub _memory: vkbox::DeviceMemory<'a>,
 }
 
 impl SdlContext {
@@ -263,10 +257,24 @@ impl VkContext {
             .compare_enable(false)
             .compare_op(vk::CompareOp::NEVER)
             .min_lod(0.0)
-            .max_lod(0.0)
+            .max_lod(vk::LOD_CLAMP_NONE)
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .unnormalized_coordinates(false);
         vkbox::Sampler::new(self, &create_info)
+    }
+
+    pub unsafe fn create_graphics_command_pool(&self) -> vkbox::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(self.physical_device.queue_family_index_graphics);
+        vkbox::CommandPool::new(self, &create_info)
+    }
+
+    pub unsafe fn create_graphics_transient_command_pool(&self) -> vkbox::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+            .queue_family_index(self.physical_device.queue_family_index_graphics);
+        vkbox::CommandPool::new(self, &create_info)
     }
 
     pub unsafe fn create_shader_module(&self, bytecode: &[u8]) -> vkbox::ShaderModule {
@@ -288,6 +296,7 @@ impl VkContext {
         image: vk::Image,
         format: vk::Format,
         aspect_mask: vk::ImageAspectFlags,
+        mip_levels: u32,
     ) -> vkbox::ImageView {
         let create_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -296,40 +305,64 @@ impl VkContext {
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: mip_levels,
                 base_array_layer: 0,
                 layer_count: 1,
             });
         vkbox::ImageView::new(self, &create_info)
     }
 
-    pub unsafe fn create_framebuffer(
+    pub unsafe fn create_depth_buffer(
         &self,
-        attachments: &[vk::ImageView],
+        command_pool: vk::CommandPool,
+        format: vk::Format,
         extent: vk::Extent2D,
-        render_pass: vk::RenderPass,
-    ) -> vkbox::Framebuffer {
-        let create_info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .attachments(attachments)
-            .width(extent.width)
-            .height(extent.height)
-            .layers(1);
-        vkbox::Framebuffer::new(self, &create_info)
-    }
+    ) -> CommittedImage {
+        let depth_buffer = CommittedImage::new(
+            self,
+            format,
+            extent,
+            1,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::ImageAspectFlags::DEPTH,
+        );
+        let has_stencil_component =
+            vk::Format::D32_SFLOAT_S8_UINT == format || vk::Format::D24_UNORM_S8_UINT == format;
+        let mut aspect_mask = vk::ImageAspectFlags::DEPTH;
+        if has_stencil_component {
+            aspect_mask |= vk::ImageAspectFlags::STENCIL
+        }
 
-    pub unsafe fn create_graphics_command_pool(&self) -> vkbox::CommandPool {
-        let create_info = vk::CommandPoolCreateInfo::default()
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-            .queue_family_index(self.physical_device.queue_family_index_graphics);
-        vkbox::CommandPool::new(self, &create_info)
-    }
+        let command_buffer = TransientGraphicsCommandBuffer::begin(self, command_pool);
+        let image_memory_barriers = [vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            )
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(depth_buffer.image.0)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })];
+        self.device.cmd_pipeline_barrier(
+            command_buffer.buffer,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &image_memory_barriers,
+        );
 
-    pub unsafe fn create_graphics_transient_command_pool(&self) -> vkbox::CommandPool {
-        let create_info = vk::CommandPoolCreateInfo::default()
-            .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-            .queue_family_index(self.physical_device.queue_family_index_graphics);
-        vkbox::CommandPool::new(self, &create_info)
+        depth_buffer
     }
 
     pub unsafe fn allocate_command_buffers(
@@ -498,28 +531,33 @@ impl<'a> Swapchain<'a> {
         let image_views: Vec<_> = images
             .iter()
             .map(|&img| {
-                vk.create_image_view(img, create_info.image_format, vk::ImageAspectFlags::COLOR)
+                vk.create_image_view(
+                    img,
+                    create_info.image_format,
+                    vk::ImageAspectFlags::COLOR,
+                    1,
+                )
             })
             .collect();
-        let depth_buffer = CommittedDepthBuffer::new(
-            vk,
-            command_pool,
-            depth_buffer_format,
-            create_info.image_extent,
-        );
+        let depth_buffer =
+            vk.create_depth_buffer(command_pool, depth_buffer_format, create_info.image_extent);
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                vk.create_framebuffer(
-                    &[iv.0, depth_buffer.view.0],
-                    create_info.image_extent,
-                    render_pass,
-                )
+                let attachments = [iv.0, depth_buffer.view.0];
+                let extent = create_info.image_extent;
+                let create_info = vk::FramebufferCreateInfo::default()
+                    .render_pass(render_pass)
+                    .attachments(&attachments)
+                    .width(extent.width)
+                    .height(extent.height)
+                    .layers(1);
+                vkbox::Framebuffer::new(vk, &create_info)
             })
             .collect();
         Self {
             framebuffers,
-            depth_buffer,
+            _depth_buffer: depth_buffer,
             _image_views: image_views,
             swapchain,
         }
@@ -666,14 +704,16 @@ impl<'a> CommittedImage<'a> {
         vk: &'a VkContext,
         format: vk::Format,
         extent: vk::Extent2D,
+        mip_levels: u32,
         usage: vk::ImageUsageFlags,
+        aspect_mask: vk::ImageAspectFlags,
     ) -> Self {
         let queue_family_indices = [vk.physical_device.queue_family_index_graphics];
         let create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format)
             .extent(extent.into())
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
@@ -685,15 +725,11 @@ impl<'a> CommittedImage<'a> {
         let memory_requirements = vk.device.get_image_memory_requirements(image.0);
         let memory = vk.allocate_memory(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL);
         vk.device.bind_image_memory(image.0, memory.0, 0).unwrap();
+        let view = vk.create_image_view(image.0, format, aspect_mask, mip_levels);
         Self {
             image,
+            view,
             _memory: memory,
-            create_info: vk::ImageCreateInfo {
-                queue_family_index_count: 0,
-                p_queue_family_indices: ptr::null(),
-                _marker: PhantomData,
-                ..create_info
-            },
         }
     }
 
@@ -704,12 +740,17 @@ impl<'a> CommittedImage<'a> {
         srgb: &[u8],
     ) -> Self {
         assert_eq!(srgb.len() as u32, 4 * extent.width * extent.height);
+        let mip_levels = extent.width.max(extent.height).ilog2() + 1;
         let staging = CommittedBuffer::new_staging(vk, srgb);
         let out = Self::new(
             vk,
             vk::Format::R8G8B8A8_UNORM,
             extent,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            mip_levels,
+            vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
         );
 
         let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
@@ -725,7 +766,7 @@ impl<'a> CommittedImage<'a> {
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: mip_levels,
                 base_array_layer: 0,
                 layer_count: 1,
             })];
@@ -760,21 +801,103 @@ impl<'a> CommittedImage<'a> {
             &regions,
         );
 
-        let image_memory_barriers = [vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(out.image.0)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            })];
+        let mut mip_offset = vk::Offset3D {
+            x: extent.width as _,
+            y: extent.height as _,
+            z: 1,
+        };
+        for i in 1..mip_levels {
+            let image_memory_barriers = [vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(out.image.0)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: i - 1,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })];
+            vk.device.cmd_pipeline_barrier(
+                command_buffer.buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &image_memory_barriers,
+            );
+
+            let next_mip_offset = vk::Offset3D {
+                x: 1.max(mip_offset.x / 2),
+                y: 1.max(mip_offset.y / 2),
+                z: 1,
+            };
+            let regions = [vk::ImageBlit {
+                src_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: i - 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                src_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, mip_offset],
+                dst_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: i,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                dst_offsets: [vk::Offset3D { x: 0, y: 0, z: 0 }, next_mip_offset],
+            }];
+            mip_offset = next_mip_offset;
+
+            vk.device.cmd_blit_image(
+                command_buffer.buffer,
+                out.image.0,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                out.image.0,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+                vk::Filter::LINEAR,
+            );
+        }
+
+        let image_memory_barriers = [
+            vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(out.image.0)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: mip_levels - 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                }),
+            vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(out.image.0)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: mip_levels - 1,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                }),
+        ];
         vk.device.cmd_pipeline_barrier(
             command_buffer.buffer,
             vk::PipelineStageFlags::TRANSFER,
@@ -785,62 +908,5 @@ impl<'a> CommittedImage<'a> {
             &image_memory_barriers,
         );
         out
-    }
-}
-
-impl<'a> CommittedDepthBuffer<'a> {
-    pub unsafe fn new(
-        vk: &'a VkContext,
-        command_pool: vk::CommandPool,
-        format: vk::Format,
-        extent: vk::Extent2D,
-    ) -> Self {
-        let has_stencil_component =
-            vk::Format::D32_SFLOAT_S8_UINT == format || vk::Format::D24_UNORM_S8_UINT == format;
-        let backend = CommittedImage::new(
-            &vk,
-            format,
-            extent,
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-        );
-        let view = vk.create_image_view(backend.image.0, format, vk::ImageAspectFlags::DEPTH);
-
-        let aspect_mask = vk::ImageAspectFlags::DEPTH
-            | if has_stencil_component {
-                vk::ImageAspectFlags::STENCIL
-            } else {
-                vk::ImageAspectFlags::empty()
-            };
-
-        let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
-        let image_memory_barriers = [vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            )
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(backend.image.0)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            })];
-        vk.device.cmd_pipeline_barrier(
-            command_buffer.buffer,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &image_memory_barriers,
-        );
-
-        Self { backend, view }
     }
 }

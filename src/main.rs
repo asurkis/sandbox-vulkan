@@ -85,8 +85,12 @@ fn main() {
         let mut vertex_buffer_data = Vec::with_capacity(n_vertices);
         for i in 0..n_vertices {
             vertex_buffer_data.push(Vertex {
-                pos: Vector(mesh.positions[3 * i..3 * i + 3].try_into().unwrap()),
-                texcoord: Vector(mesh.texcoords[2 * i..2 * i + 2].try_into().unwrap()),
+                pos: Vector([
+                    mesh.positions[3 * i + 0],
+                    mesh.positions[3 * i + 2],
+                    mesh.positions[3 * i + 1],
+                ]),
+                texcoord: Vector([mesh.texcoords[2 * i + 0], 1.0 - mesh.texcoords[2 * i + 1]]),
             });
         }
         let index_buffer = CommittedBuffer::upload(
@@ -102,26 +106,24 @@ fn main() {
             BufferUsageFlags::VERTEX_BUFFER,
         );
         let _ = meshes;
+        let _ = vertex_buffer_data;
 
-        let texture_data = image::ImageReader::open("assets/viking_room.png")
-            .unwrap()
-            .decode()
-            .unwrap()
-            .to_rgba8();
-        let texture = CommittedImage::upload(
-            &vk,
-            command_pool_transient.0,
-            vk::Extent2D {
-                width: texture_data.width(),
-                height: texture_data.height(),
-            },
-            &texture_data.as_bytes(),
-        );
-        let texture_view = vk.create_image_view(
-            texture.image.0,
-            texture.create_info.format,
-            vk::ImageAspectFlags::COLOR,
-        );
+        let texture = {
+            let texture_data = image::ImageReader::open("assets/viking_room.png")
+                .unwrap()
+                .decode()
+                .unwrap()
+                .to_rgba8();
+            CommittedImage::upload(
+                &vk,
+                command_pool_transient.0,
+                vk::Extent2D {
+                    width: texture_data.width(),
+                    height: texture_data.height(),
+                },
+                &texture_data.as_bytes(),
+            )
+        };
         let texture_sampler = vk.create_sampler();
 
         let mut uniform_data = UniformData::default();
@@ -163,7 +165,7 @@ fn main() {
             descriptor_pool.0,
             pipeline.descriptor_set_layout.0,
             texture_sampler.0,
-            texture_view.0,
+            texture.view.0,
             &uniform_buffers,
         );
 
@@ -507,7 +509,7 @@ impl<'a> PipelineBox<'a> {
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::BACK)
-            // .front_face(vk::FrontFace::CLOCKWISE)
+            .front_face(vk::FrontFace::CLOCKWISE)
             .line_width(1.0);
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
