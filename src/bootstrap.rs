@@ -3,7 +3,6 @@ use ash::vk::Handle;
 use std::collections::HashSet;
 use std::ffi::CStr;
 use std::ffi::CString;
-use std::marker::PhantomData;
 use std::mem;
 use std::ptr;
 
@@ -39,6 +38,7 @@ pub struct PhysicalDeviceContext {
 #[derive(Debug, Default)]
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
+    pub _color_buffer: CommittedImage<'a>,
     pub _depth_buffer: CommittedImage<'a>,
     pub _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
@@ -317,12 +317,14 @@ impl VkContext {
         command_pool: vk::CommandPool,
         format: vk::Format,
         extent: vk::Extent2D,
+        samples: vk::SampleCountFlags,
     ) -> CommittedImage {
         let depth_buffer = CommittedImage::new(
             self,
             format,
             extent,
             1,
+            samples,
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             vk::ImageAspectFlags::DEPTH,
         );
@@ -516,6 +518,7 @@ impl<'a> Swapchain<'a> {
         command_pool: vk::CommandPool,
         mut create_info: vk::SwapchainCreateInfoKHR,
         depth_buffer_format: vk::Format,
+        samples: vk::SampleCountFlags,
         render_pass: vk::RenderPass,
         old_swapchain: Option<&Self>,
     ) -> Self {
@@ -539,12 +542,25 @@ impl<'a> Swapchain<'a> {
                 )
             })
             .collect();
-        let depth_buffer =
-            vk.create_depth_buffer(command_pool, depth_buffer_format, create_info.image_extent);
+        let color_buffer = CommittedImage::new(
+            vk,
+            create_info.image_format,
+            create_info.image_extent,
+            1,
+            samples,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            vk::ImageAspectFlags::COLOR,
+        );
+        let depth_buffer = vk.create_depth_buffer(
+            command_pool,
+            depth_buffer_format,
+            create_info.image_extent,
+            samples,
+        );
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = [iv.0, depth_buffer.view.0];
+                let attachments = [color_buffer.view.0, depth_buffer.view.0, iv.0];
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(render_pass)
@@ -557,6 +573,7 @@ impl<'a> Swapchain<'a> {
             .collect();
         Self {
             framebuffers,
+            _color_buffer: color_buffer,
             _depth_buffer: depth_buffer,
             _image_views: image_views,
             swapchain,
@@ -569,6 +586,7 @@ impl<'a> Swapchain<'a> {
         command_pool: vk::CommandPool,
         create_info: &mut vk::SwapchainCreateInfoKHR,
         depth_buffer_format: vk::Format,
+        samples: vk::SampleCountFlags,
         render_pass: vk::RenderPass,
     ) {
         let capabilities = vk
@@ -587,6 +605,7 @@ impl<'a> Swapchain<'a> {
             command_pool,
             *create_info,
             depth_buffer_format,
+            samples,
             render_pass,
             Some(self),
         );
@@ -705,6 +724,7 @@ impl<'a> CommittedImage<'a> {
         format: vk::Format,
         extent: vk::Extent2D,
         mip_levels: u32,
+        samples: vk::SampleCountFlags,
         usage: vk::ImageUsageFlags,
         aspect_mask: vk::ImageAspectFlags,
     ) -> Self {
@@ -715,7 +735,7 @@ impl<'a> CommittedImage<'a> {
             .extent(extent.into())
             .mip_levels(mip_levels)
             .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
+            .samples(samples)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -747,6 +767,7 @@ impl<'a> CommittedImage<'a> {
             vk::Format::R8G8B8A8_UNORM,
             extent,
             mip_levels,
+            vk::SampleCountFlags::TYPE_1,
             vk::ImageUsageFlags::TRANSFER_SRC
                 | vk::ImageUsageFlags::TRANSFER_DST
                 | vk::ImageUsageFlags::SAMPLED,

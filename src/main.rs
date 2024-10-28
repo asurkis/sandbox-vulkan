@@ -45,6 +45,29 @@ fn main() {
         let mut sdl = SdlContext::new();
         let vk = VkContext::new(&sdl);
 
+        let physical_device_props = vk
+            .instance
+            .get_physical_device_properties(vk.physical_device.physical_device);
+        let mut msaa_sample_count = vk::SampleCountFlags::TYPE_1;
+        for candidate in [
+            vk::SampleCountFlags::TYPE_64,
+            vk::SampleCountFlags::TYPE_32,
+            vk::SampleCountFlags::TYPE_16,
+            vk::SampleCountFlags::TYPE_8,
+            vk::SampleCountFlags::TYPE_4,
+            vk::SampleCountFlags::TYPE_2,
+            vk::SampleCountFlags::TYPE_1,
+        ] {
+            if candidate
+                & physical_device_props.limits.framebuffer_color_sample_counts
+                & physical_device_props.limits.framebuffer_depth_sample_counts
+                == candidate
+            {
+                msaa_sample_count = candidate;
+                break;
+            }
+        }
+
         let depth_buffer_format = vk.select_image_format(
             &[
                 vk::Format::D32_SFLOAT,
@@ -57,17 +80,22 @@ fn main() {
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
         let mut swapchain_create_info = vk.physical_device.swapchain_create_info();
-        let render_pass =
-            create_render_pass(&vk, swapchain_create_info.image_format, depth_buffer_format);
+        let render_pass = create_render_pass(
+            &vk,
+            swapchain_create_info.image_format,
+            depth_buffer_format,
+            msaa_sample_count,
+        );
         let mut swapchain = Swapchain::new(
             &vk,
             command_pool_transient.0,
             swapchain_create_info,
             depth_buffer_format,
+            msaa_sample_count,
             render_pass.0,
             None,
         );
-        let pipeline = PipelineBox::new(&vk, render_pass.0);
+        let pipeline = PipelineBox::new(&vk, render_pass.0, msaa_sample_count);
 
         let (meshes, _) = tobj::load_obj(
             "assets/viking_room.obj",
@@ -189,6 +217,7 @@ fn main() {
                             command_pool_transient.0,
                             &mut swapchain_create_info,
                             depth_buffer_format,
+                            msaa_sample_count,
                             render_pass.0,
                         );
                         continue 'main_loop;
@@ -269,6 +298,7 @@ fn main() {
                         command_pool_transient.0,
                         &mut swapchain_create_info,
                         depth_buffer_format,
+                        msaa_sample_count,
                         render_pass.0,
                     );
                     continue;
@@ -380,6 +410,7 @@ fn main() {
                         command_pool_transient.0,
                         &mut swapchain_create_info,
                         depth_buffer_format,
+                        msaa_sample_count,
                         render_pass.0,
                     );
                 }
@@ -399,23 +430,24 @@ unsafe fn create_render_pass(
     vk: &VkContext,
     display_format: vk::Format,
     depth_buffer_format: vk::Format,
+    samples: vk::SampleCountFlags,
 ) -> vkbox::RenderPass {
     let attachments = [
         vk::AttachmentDescription {
             flags: vk::AttachmentDescriptionFlags::empty(),
             format: display_format,
-            samples: vk::SampleCountFlags::TYPE_1,
+            samples,
             load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::STORE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         },
         vk::AttachmentDescription {
             flags: vk::AttachmentDescriptionFlags::empty(),
             format: depth_buffer_format,
-            samples: vk::SampleCountFlags::TYPE_1,
+            samples,
             load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::DONT_CARE,
             stencil_load_op: vk::AttachmentLoadOp::CLEAR,
@@ -423,9 +455,24 @@ unsafe fn create_render_pass(
             initial_layout: vk::ImageLayout::UNDEFINED,
             final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         },
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: display_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::DONT_CARE,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+        },
     ];
     let color_attachments = [vk::AttachmentReference {
         attachment: 0,
+        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+    }];
+    let resolve_attachments = [vk::AttachmentReference {
+        attachment: 2,
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
     }];
     let depth_stencil_attachment = vk::AttachmentReference {
@@ -435,6 +482,7 @@ unsafe fn create_render_pass(
     let subpasses = [vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&color_attachments)
+        .resolve_attachments(&resolve_attachments)
         .depth_stencil_attachment(&depth_stencil_attachment)];
     let dependencies = [vk::SubpassDependency {
         src_subpass: vk::SUBPASS_EXTERNAL,
@@ -443,7 +491,8 @@ unsafe fn create_render_pass(
             | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
         dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
             | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
         dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE
             | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
         dependency_flags: vk::DependencyFlags::empty(),
@@ -463,7 +512,11 @@ struct PipelineBox<'a> {
 }
 
 impl<'a> PipelineBox<'a> {
-    unsafe fn new(vk: &'a VkContext, render_pass: vk::RenderPass) -> Self {
+    unsafe fn new(
+        vk: &'a VkContext,
+        render_pass: vk::RenderPass,
+        rasterization_samples: vk::SampleCountFlags,
+    ) -> Self {
         let shader_module_vert = vk.create_shader_module(BYTECODE_VERT);
         let shader_module_frag = vk.create_shader_module(BYTECODE_FRAG);
 
@@ -512,7 +565,7 @@ impl<'a> PipelineBox<'a> {
             .front_face(vk::FrontFace::CLOCKWISE)
             .line_width(1.0);
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(rasterization_samples);
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
             src_color_blend_factor: vk::BlendFactor::ONE,
