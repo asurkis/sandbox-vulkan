@@ -221,7 +221,7 @@ fn main() {
         let mut frame_in_flight_index = 0;
 
         let mut time_prev = time::Instant::now();
-        let mut angle = 0.0f32;
+        let mut angle_deg = 0.0f32;
         let mut turn_speed = 0.0;
 
         'main_loop: loop {
@@ -259,22 +259,22 @@ fn main() {
             let ui = imgui.new_frame();
             ui.window("Info").build(|| {
                 ui.slider("Turn speed", -1.0, 1.0, &mut turn_speed);
-                ui.text(format!("Current angle: {:3.02}", angle.to_degrees()));
+                ui.slider("Angle", -180.0, 180.0, &mut angle_deg);
             });
 
             let time_elapsed = time_curr - time_prev;
             let nanos = time_elapsed.as_secs() * 1_000_000_000 + time_elapsed.subsec_nanos() as u64;
-            let angle_delta = 2.0e-9 * std::f32::consts::PI * nanos as f32;
-            angle += turn_speed * angle_delta;
-            if angle > std::f32::consts::PI {
-                angle -= 2.0 * std::f32::consts::PI;
+            let angle_deg_delta = 360.0e-9 * nanos as f32;
+            angle_deg += turn_speed * angle_deg_delta;
+            while angle_deg > 180.0 {
+                angle_deg -= 360.0;
             }
-            if angle < -std::f32::consts::PI {
-                angle += 2.0 * std::f32::consts::PI;
+            while angle_deg < -180.0 {
+                angle_deg += 360.0;
             }
             time_prev = time_curr;
 
-            let (sin, cos) = angle.sin_cos();
+            let (sin, cos) = angle_deg.to_radians().sin_cos();
 
             let cam_pos = Vector([sin, 1.0, cos]);
             let look_at = Vector([0.0; 3]);
