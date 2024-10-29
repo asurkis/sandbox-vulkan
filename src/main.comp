@@ -1,0 +1,30 @@
+#version 450
+
+#define PARTICLE_COUNT (1 << 17)
+
+layout (binding = 0) readonly buffer InPosSSBO {
+    vec2 in_pos[];
+};
+
+layout (binding = 1) writeonly buffer OutPosSSBO {
+    vec2 out_pos[];
+};
+
+layout (binding = 2) buffer VelSSBO {
+    vec2 vel[];
+};
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec2 acc = vec2(0.0);
+    for (uint j = 0; j < PARTICLE_COUNT; ++j) {
+        vec2 diff = in_pos[j] - in_pos[i];
+        float len = max(1e-10, length(diff));
+        float k = 1e-9 * (len - 0.25) / len;
+        acc += k * diff;
+    }
+    out_pos[i] = in_pos[i] + vel[i] + 0.5 * acc;
+    vel[i] += acc;
+}

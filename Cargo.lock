@@ -893,6 +893,7 @@ dependencies = [
  "imgui",
  "imgui-rs-vulkan-renderer",
  "imgui-sdl2-support",
+ "rand",
  "sdl2",
  "tobj",
 ]

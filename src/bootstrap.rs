@@ -69,7 +69,7 @@ impl SdlContext {
         let event_pump = system.event_pump().unwrap();
         let video = system.video().unwrap();
         let window = video
-            .window("Window1", 1280, 720)
+            .window("Window1", 900, 900)
             .resizable()
             .position_centered()
             .vulkan()
@@ -221,25 +221,26 @@ impl VkContext {
         let allocate_info = vk::MemoryAllocateInfo::default()
             .allocation_size(memory_requirements.size)
             .memory_type_index(memory_type_index);
-        vkbox::DeviceMemory::new(self, &allocate_info)
+        vkbox::DeviceMemory::create(self, &allocate_info)
     }
 
     #[allow(unused)]
     pub unsafe fn create_fence(&self) -> vkbox::Fence {
         let create_info = vk::FenceCreateInfo::default();
-        vkbox::Fence::new(self, &create_info)
+        vkbox::Fence::create(self, &create_info)
     }
 
     pub unsafe fn create_fence_signaled(&self) -> vkbox::Fence {
         let create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        vkbox::Fence::new(self, &create_info)
+        vkbox::Fence::create(self, &create_info)
     }
 
     pub unsafe fn create_semaphore(&self) -> vkbox::Semaphore {
         let create_info = vk::SemaphoreCreateInfo::default();
-        vkbox::Semaphore::new(self, &create_info)
+        vkbox::Semaphore::create(self, &create_info)
     }
 
+    #[allow(unused)]
     pub unsafe fn create_sampler(&self) -> vkbox::Sampler {
         let physical_device_properties = self
             .instance
@@ -260,21 +261,21 @@ impl VkContext {
             .max_lod(vk::LOD_CLAMP_NONE)
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .unnormalized_coordinates(false);
-        vkbox::Sampler::new(self, &create_info)
+        vkbox::Sampler::create(self, &create_info)
     }
 
     pub unsafe fn create_graphics_command_pool(&self) -> vkbox::CommandPool {
         let create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .queue_family_index(self.physical_device.queue_family_index_graphics);
-        vkbox::CommandPool::new(self, &create_info)
+        vkbox::CommandPool::create(self, &create_info)
     }
 
     pub unsafe fn create_graphics_transient_command_pool(&self) -> vkbox::CommandPool {
         let create_info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
             .queue_family_index(self.physical_device.queue_family_index_graphics);
-        vkbox::CommandPool::new(self, &create_info)
+        vkbox::CommandPool::create(self, &create_info)
     }
 
     pub unsafe fn create_shader_module(&self, bytecode: &[u8]) -> vkbox::ShaderModule {
@@ -288,7 +289,7 @@ impl VkContext {
             code_safe.push(u);
         }
         let create_info = vk::ShaderModuleCreateInfo::default().code(&code_safe);
-        vkbox::ShaderModule::new(self, &create_info)
+        vkbox::ShaderModule::create(self, &create_info)
     }
 
     pub unsafe fn create_image_view(
@@ -309,7 +310,7 @@ impl VkContext {
                 base_array_layer: 0,
                 layer_count: 1,
             });
-        vkbox::ImageView::new(self, &create_info)
+        vkbox::ImageView::create(self, &create_info)
     }
 
     pub unsafe fn create_depth_buffer(
@@ -319,7 +320,7 @@ impl VkContext {
         extent: vk::Extent2D,
         samples: vk::SampleCountFlags,
     ) -> CommittedImage {
-        let depth_buffer = CommittedImage::new(
+        let depth_buffer = CommittedImage::create(
             self,
             format,
             extent,
@@ -526,7 +527,7 @@ impl<'a> Swapchain<'a> {
             create_info.old_swapchain = old.swapchain.0;
             vk.device.device_wait_idle().unwrap();
         }
-        let swapchain = vkbox::SwapchainKHR::new(vk, &create_info);
+        let swapchain = vkbox::SwapchainKHR::create(vk, &create_info);
         let images = vk
             .device_ext_swapchain
             .get_swapchain_images(swapchain.0)
@@ -542,15 +543,19 @@ impl<'a> Swapchain<'a> {
                 )
             })
             .collect();
-        let color_buffer = CommittedImage::new(
-            vk,
-            create_info.image_format,
-            create_info.image_extent,
-            1,
-            samples,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            vk::ImageAspectFlags::COLOR,
-        );
+        let color_buffer = if samples == vk::SampleCountFlags::TYPE_1 {
+            CommittedImage::default()
+        } else {
+            CommittedImage::create(
+                vk,
+                create_info.image_format,
+                create_info.image_extent,
+                1,
+                samples,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+            )
+        };
         let depth_buffer = vk.create_depth_buffer(
             command_pool,
             depth_buffer_format,
@@ -560,7 +565,11 @@ impl<'a> Swapchain<'a> {
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = [color_buffer.view.0, depth_buffer.view.0, iv.0];
+                let attachments = if samples == vk::SampleCountFlags::TYPE_1 {
+                    vec![iv.0, depth_buffer.view.0]
+                } else {
+                    vec![color_buffer.view.0, depth_buffer.view.0, iv.0]
+                };
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(render_pass)
@@ -568,7 +577,7 @@ impl<'a> Swapchain<'a> {
                     .width(extent.width)
                     .height(extent.height)
                     .layers(1);
-                vkbox::Framebuffer::new(vk, &create_info)
+                vkbox::Framebuffer::create(vk, &create_info)
             })
             .collect();
         Self {
@@ -644,7 +653,7 @@ impl<'a> Drop for TransientGraphicsCommandBuffer<'a> {
 }
 
 impl<'a> CommittedBuffer<'a> {
-    pub unsafe fn new(
+    pub unsafe fn create(
         vk: &'a VkContext,
         size: u64,
         usage: vk::BufferUsageFlags,
@@ -656,7 +665,7 @@ impl<'a> CommittedBuffer<'a> {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .queue_family_indices(&queue_family_indices);
-        let buffer = vkbox::Buffer::new(vk, &create_info);
+        let buffer = vkbox::Buffer::create(vk, &create_info);
 
         let memory_requirements = vk.device.get_buffer_memory_requirements(buffer.0);
         let memory = vk.allocate_memory(memory_requirements, memory_property_flags);
@@ -666,7 +675,7 @@ impl<'a> CommittedBuffer<'a> {
 
     pub unsafe fn new_staging<T: Copy>(vk: &'a VkContext, data: &[T]) -> Self {
         let data_size = mem::size_of_val(data);
-        let staging = Self::new(
+        let staging = Self::create(
             vk,
             data_size as _,
             vk::BufferUsageFlags::TRANSFER_SRC,
@@ -693,7 +702,7 @@ impl<'a> CommittedBuffer<'a> {
         usage: vk::BufferUsageFlags,
     ) -> Self {
         let data_size = mem::size_of_val(data);
-        let out = Self::new(
+        let out = Self::create(
             vk,
             data_size as _,
             usage | vk::BufferUsageFlags::TRANSFER_DST,
@@ -719,7 +728,7 @@ impl<'a> CommittedBuffer<'a> {
 }
 
 impl<'a> CommittedImage<'a> {
-    pub unsafe fn new(
+    pub unsafe fn create(
         vk: &'a VkContext,
         format: vk::Format,
         extent: vk::Extent2D,
@@ -741,7 +750,7 @@ impl<'a> CommittedImage<'a> {
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .queue_family_indices(&queue_family_indices)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let image = vkbox::Image::new(vk, &create_info);
+        let image = vkbox::Image::create(vk, &create_info);
         let memory_requirements = vk.device.get_image_memory_requirements(image.0);
         let memory = vk.allocate_memory(memory_requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL);
         vk.device.bind_image_memory(image.0, memory.0, 0).unwrap();
@@ -762,7 +771,7 @@ impl<'a> CommittedImage<'a> {
         assert_eq!(srgb.len() as u32, 4 * extent.width * extent.height);
         let mip_levels = extent.width.max(extent.height).ilog2() + 1;
         let staging = CommittedBuffer::new_staging(vk, srgb);
-        let out = Self::new(
+        let out = Self::create(
             vk,
             vk::Format::R8G8B8A8_UNORM,
             extent,
