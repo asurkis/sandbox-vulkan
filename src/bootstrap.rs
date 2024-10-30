@@ -16,6 +16,7 @@ pub struct SdlContext {
 pub struct VkContext {
     pub instance: ash::Instance,
     pub instance_ext_surface: ash::khr::surface::Instance,
+    pub surface: vk::SurfaceKHR,
     pub physical_device: PhysicalDeviceContext,
     pub device: ash::Device,
     pub device_ext_swapchain: ash::khr::swapchain::Device,
@@ -25,23 +26,28 @@ pub struct VkContext {
 
 #[derive(Debug, Default, Clone)]
 pub struct PhysicalDeviceContext {
-    pub surface: vk::SurfaceKHR,
     pub physical_device: vk::PhysicalDevice,
     pub queue_family_indices: [u32; 2],
     pub queue_family_index_graphics: u32,
     pub queue_family_index_present: u32,
-    pub surface_capabilities: vk::SurfaceCapabilitiesKHR,
     pub surface_formats: Vec<vk::SurfaceFormatKHR>,
     pub surface_present_modes: Vec<vk::PresentModeKHR>,
 }
 
-#[derive(Debug, Default)]
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
     pub _color_buffer: CommittedImage<'a>,
     pub _depth_buffer: CommittedImage<'a>,
     pub _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
+
+    command_pool: vk::CommandPool,
+    render_pass: vk::RenderPass,
+    pub extent: vk::Extent2D,
+    depth_buffer_format: vk::Format,
+    samples: vk::SampleCountFlags,
+
+    vk: &'a VkContext,
 }
 
 pub struct TransientGraphicsCommandBuffer<'a> {
@@ -102,6 +108,7 @@ impl VkContext {
         Self {
             instance,
             instance_ext_surface,
+            surface,
             physical_device,
             device,
             device_ext_swapchain,
@@ -388,7 +395,7 @@ impl Drop for VkContext {
         unsafe {
             self.device.destroy_device(None);
             self.instance_ext_surface
-                .destroy_surface(self.physical_device.surface, None);
+                .destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
@@ -403,7 +410,6 @@ impl PhysicalDeviceContext {
         let physical_device_list = instance.enumerate_physical_devices().unwrap();
         for pd in physical_device_list {
             let mut info = Self::default();
-            info.surface = surface;
             info.physical_device = pd;
 
             let device_features = instance.get_physical_device_features(pd);
@@ -450,9 +456,6 @@ impl PhysicalDeviceContext {
                 info.queue_family_index_present,
             ];
 
-            info.surface_capabilities = instance_ext_surface
-                .get_physical_device_surface_capabilities(pd, surface)
-                .unwrap();
             info.surface_formats = instance_ext_surface
                 .get_physical_device_surface_formats(pd, surface)
                 .unwrap();
@@ -468,61 +471,18 @@ impl PhysicalDeviceContext {
         }
         panic!("No fitting device found");
     }
-
-    pub fn swapchain_create_info(&self) -> vk::SwapchainCreateInfoKHR {
-        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(self.surface)
-            .min_image_count(self.surface_capabilities.min_image_count)
-            .image_format(self.surface_formats[0].format)
-            .image_color_space(self.surface_formats[0].color_space)
-            .image_extent(self.surface_capabilities.current_extent)
-            .image_array_layers(1)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-            .image_sharing_mode(vk::SharingMode::CONCURRENT)
-            .queue_family_indices(&self.queue_family_indices)
-            .pre_transform(self.surface_capabilities.current_transform)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::FIFO)
-            .clipped(false);
-        if self.surface_capabilities.max_image_count == 0
-            || self.surface_capabilities.min_image_count < self.surface_capabilities.max_image_count
-        {
-            swapchain_create_info.min_image_count += 1;
-        }
-        if self.queue_family_index_graphics == self.queue_family_index_present {
-            swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
-            swapchain_create_info.queue_family_index_count = 0;
-            swapchain_create_info.p_queue_family_indices = ptr::null();
-        }
-        for format in &self.surface_formats {
-            if format.format == vk::Format::B8G8R8A8_UNORM
-                && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-            {
-                swapchain_create_info.image_format = format.format;
-                swapchain_create_info.image_color_space = format.color_space;
-                break;
-            }
-        }
-        for &present_mode in &self.surface_present_modes {
-            if present_mode == vk::PresentModeKHR::MAILBOX {
-                swapchain_create_info.present_mode = present_mode;
-                break;
-            }
-        }
-        swapchain_create_info
-    }
 }
 
 impl<'a> Swapchain<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
         command_pool: vk::CommandPool,
-        mut create_info: vk::SwapchainCreateInfoKHR,
+        render_pass: vk::RenderPass,
         depth_buffer_format: vk::Format,
         samples: vk::SampleCountFlags,
-        render_pass: vk::RenderPass,
         old_swapchain: Option<&Self>,
     ) -> Self {
+        let mut create_info = Self::create_info(vk);
         if let Some(old) = old_swapchain {
             create_info.old_swapchain = old.swapchain.0;
             vk.device.device_wait_idle().unwrap();
@@ -543,9 +503,8 @@ impl<'a> Swapchain<'a> {
                 )
             })
             .collect();
-        let color_buffer = if samples == vk::SampleCountFlags::TYPE_1 {
-            CommittedImage::default()
-        } else {
+        let msaa_on = samples != vk::SampleCountFlags::TYPE_1;
+        let color_buffer = if msaa_on {
             CommittedImage::create(
                 vk,
                 create_info.image_format,
@@ -555,6 +514,8 @@ impl<'a> Swapchain<'a> {
                 vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 vk::ImageAspectFlags::COLOR,
             )
+        } else {
+            CommittedImage::default()
         };
         let depth_buffer = vk.create_depth_buffer(
             command_pool,
@@ -565,10 +526,10 @@ impl<'a> Swapchain<'a> {
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = if samples == vk::SampleCountFlags::TYPE_1 {
-                    vec![iv.0, depth_buffer.view.0]
-                } else {
+                let attachments = if msaa_on {
                     vec![color_buffer.view.0, depth_buffer.view.0, iv.0]
+                } else {
+                    vec![iv.0, depth_buffer.view.0]
                 };
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
@@ -586,36 +547,86 @@ impl<'a> Swapchain<'a> {
             _depth_buffer: depth_buffer,
             _image_views: image_views,
             swapchain,
+            command_pool,
+            render_pass,
+            extent: create_info.image_extent,
+            depth_buffer_format,
+            samples,
+            vk,
         }
     }
 
-    pub unsafe fn reinit(
-        &mut self,
-        vk: &'a VkContext,
-        command_pool: vk::CommandPool,
-        create_info: &mut vk::SwapchainCreateInfoKHR,
-        depth_buffer_format: vk::Format,
-        samples: vk::SampleCountFlags,
-        render_pass: vk::RenderPass,
-    ) {
-        let capabilities = vk
+    unsafe fn create_info(vk: &'a VkContext) -> vk::SwapchainCreateInfoKHR {
+        let surface_capabilities = vk
             .instance_ext_surface
             .get_physical_device_surface_capabilities(
                 vk.physical_device.physical_device,
-                vk.physical_device.surface,
+                vk.surface,
             )
             .unwrap();
-        create_info.image_extent = capabilities.current_extent;
-        if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
+        let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+            .surface(vk.surface)
+            .min_image_count(surface_capabilities.min_image_count)
+            .image_format(vk.physical_device.surface_formats[0].format)
+            .image_color_space(vk.physical_device.surface_formats[0].color_space)
+            .image_extent(surface_capabilities.current_extent)
+            .image_array_layers(1)
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(&vk.physical_device.queue_family_indices)
+            .pre_transform(surface_capabilities.current_transform)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(vk::PresentModeKHR::FIFO)
+            .clipped(false);
+        if surface_capabilities.max_image_count == 0
+            || surface_capabilities.min_image_count < surface_capabilities.max_image_count
+        {
+            swapchain_create_info.min_image_count += 1;
+        }
+        if vk.physical_device.queue_family_index_graphics
+            == vk.physical_device.queue_family_index_present
+        {
+            swapchain_create_info.image_sharing_mode = vk::SharingMode::EXCLUSIVE;
+            swapchain_create_info.queue_family_index_count = 0;
+            swapchain_create_info.p_queue_family_indices = ptr::null();
+        }
+        for format in &vk.physical_device.surface_formats {
+            if format.format == vk::Format::B8G8R8A8_UNORM
+                && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+            {
+                swapchain_create_info.image_format = format.format;
+                swapchain_create_info.image_color_space = format.color_space;
+                break;
+            }
+        }
+        for &present_mode in &vk.physical_device.surface_present_modes {
+            if present_mode == vk::PresentModeKHR::MAILBOX {
+                swapchain_create_info.present_mode = present_mode;
+                break;
+            }
+        }
+        swapchain_create_info
+    }
+
+    pub unsafe fn reinit(&mut self) {
+        let capabilities = self
+            .vk
+            .instance_ext_surface
+            .get_physical_device_surface_capabilities(
+                self.vk.physical_device.physical_device,
+                self.vk.surface,
+            )
+            .unwrap();
+        let extent = capabilities.current_extent;
+        if extent.width == 0 || extent.height == 0 {
             return;
         }
         let mut new = Self::new(
-            vk,
-            command_pool,
-            *create_info,
-            depth_buffer_format,
-            samples,
-            render_pass,
+            self.vk,
+            self.command_pool,
+            self.render_pass,
+            self.depth_buffer_format,
+            self.samples,
             Some(self),
         );
         mem::swap(self, &mut new);

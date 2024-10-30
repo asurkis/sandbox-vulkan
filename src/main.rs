@@ -62,20 +62,13 @@ fn main() {
         );
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
-        let mut swapchain_create_info = vk.physical_device.swapchain_create_info();
-        let render_pass = create_render_pass(
-            &vk,
-            swapchain_create_info.image_format,
-            depth_buffer_format,
-            msaa_sample_count,
-        );
+        let render_pass = create_render_pass(&vk, depth_buffer_format, msaa_sample_count);
         let mut swapchain = Swapchain::new(
             &vk,
             command_pool_transient.0,
-            swapchain_create_info,
+            render_pass.0,
             depth_buffer_format,
             msaa_sample_count,
-            render_pass.0,
             None,
         );
         let pipeline_graphics = PipelineBox::create_graphics(&vk, render_pass.0, msaa_sample_count);
@@ -171,14 +164,7 @@ fn main() {
                         win_event: sdl2::event::WindowEvent::Resized(_, _),
                         ..
                     } => {
-                        swapchain.reinit(
-                            &vk,
-                            command_pool_transient.0,
-                            &mut swapchain_create_info,
-                            depth_buffer_format,
-                            msaa_sample_count,
-                            render_pass.0,
-                        );
+                        swapchain.reinit();
                         continue 'main_loop;
                     }
                     _ => {}
@@ -209,15 +195,8 @@ fn main() {
             let image_index = match result {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain.reinit(
-                        &vk,
-                        command_pool_transient.0,
-                        &mut swapchain_create_info,
-                        depth_buffer_format,
-                        msaa_sample_count,
-                        render_pass.0,
-                    );
-                    continue;
+                    swapchain.reinit();
+                    continue 'main_loop;
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
@@ -262,17 +241,17 @@ fn main() {
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.0)
                 .framebuffer(swapchain.framebuffers[image_index as usize].0)
-                .render_area(swapchain_create_info.image_extent.into())
+                .render_area(swapchain.extent.into())
                 .clear_values(&clear_values);
             let viewports = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
-                width: swapchain_create_info.image_extent.width as _,
-                height: swapchain_create_info.image_extent.height as _,
+                width: swapchain.extent.width as _,
+                height: swapchain.extent.height as _,
                 min_depth: 0.0,
                 max_depth: 1.0,
             }];
-            let scissors = [swapchain_create_info.image_extent.into()];
+            let scissors = [swapchain.extent.into()];
             vk.device
                 .cmd_set_viewport(cur_command_buffer, 0, &viewports);
             vk.device.cmd_set_scissor(cur_command_buffer, 0, &scissors);
@@ -322,16 +301,7 @@ fn main() {
                 .queue_present(vk.queue_present, &present_info)
             {
                 Ok(false) => {}
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    swapchain.reinit(
-                        &vk,
-                        command_pool_transient.0,
-                        &mut swapchain_create_info,
-                        depth_buffer_format,
-                        msaa_sample_count,
-                        render_pass.0,
-                    );
-                }
+                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => swapchain.reinit(),
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
 
@@ -345,46 +315,54 @@ fn main() {
 
 unsafe fn create_render_pass(
     vk: &VkContext,
-    display_format: vk::Format,
     depth_buffer_format: vk::Format,
     samples: vk::SampleCountFlags,
 ) -> vkbox::RenderPass {
-    let mut attachments = vec![
-        vk::AttachmentDescription {
-            flags: vk::AttachmentDescriptionFlags::empty(),
-            format: display_format,
-            samples,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        },
-        vk::AttachmentDescription {
-            flags: vk::AttachmentDescriptionFlags::empty(),
-            format: depth_buffer_format,
-            samples,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
-            stencil_load_op: vk::AttachmentLoadOp::CLEAR,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        },
-        vk::AttachmentDescription {
-            flags: vk::AttachmentDescriptionFlags::empty(),
-            format: display_format,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::DONT_CARE,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-        },
-    ];
-    let color_attachments = vec![vk::AttachmentReference {
+    let msaa_on = samples != vk::SampleCountFlags::TYPE_1;
+    let display_format = vk.physical_device.surface_formats[0].format;
+    let attachments = {
+        let mut base = vec![
+            vk::AttachmentDescription {
+                flags: vk::AttachmentDescriptionFlags::empty(),
+                format: display_format,
+                samples,
+                load_op: vk::AttachmentLoadOp::CLEAR,
+                store_op: vk::AttachmentStoreOp::STORE,
+                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+                final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            },
+            vk::AttachmentDescription {
+                flags: vk::AttachmentDescriptionFlags::empty(),
+                format: depth_buffer_format,
+                samples,
+                load_op: vk::AttachmentLoadOp::CLEAR,
+                store_op: vk::AttachmentStoreOp::DONT_CARE,
+                stencil_load_op: vk::AttachmentLoadOp::CLEAR,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+                final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            },
+            vk::AttachmentDescription {
+                flags: vk::AttachmentDescriptionFlags::empty(),
+                format: display_format,
+                samples: vk::SampleCountFlags::TYPE_1,
+                load_op: vk::AttachmentLoadOp::DONT_CARE,
+                store_op: vk::AttachmentStoreOp::STORE,
+                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: vk::ImageLayout::UNDEFINED,
+                final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            },
+        ];
+        if !msaa_on {
+            base.pop();
+            base[0].final_layout = vk::ImageLayout::PRESENT_SRC_KHR;
+        }
+        base
+    };
+    let color_attachments = [vk::AttachmentReference {
         attachment: 0,
         layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
     }];
@@ -396,18 +374,16 @@ unsafe fn create_render_pass(
         attachment: 1,
         layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     };
-    if samples == vk::SampleCountFlags::TYPE_1 {
-        attachments[0].final_layout = vk::ImageLayout::PRESENT_SRC_KHR;
-        attachments.pop();
-        resolve_attachments.pop();
-    }
-    let mut subpasses = [vk::SubpassDescription::default()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_attachments)
-        .depth_stencil_attachment(&depth_stencil_attachment)];
-    if samples != vk::SampleCountFlags::TYPE_1 {
-        subpasses[0] = subpasses[0].resolve_attachments(&resolve_attachments);
-    }
+    let subpasses = [{
+        let mut base = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachments)
+            .depth_stencil_attachment(&depth_stencil_attachment);
+        if msaa_on {
+            base = base.resolve_attachments(&resolve_attachments)
+        }
+        base
+    }];
     let dependencies = [vk::SubpassDependency {
         src_subpass: vk::SUBPASS_EXTERNAL,
         dst_subpass: 0,
