@@ -35,13 +35,20 @@ pub struct PhysicalDeviceContext {
     pub surface_present_modes: Vec<vk::PresentModeKHR>,
 }
 
-#[derive(Debug, Default)]
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
     pub _color_buffer: CommittedImage<'a>,
     pub _depth_buffer: CommittedImage<'a>,
     pub _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
+
+    command_pool: vk::CommandPool,
+    render_pass: vk::RenderPass,
+    pub extent: vk::Extent2D,
+    depth_buffer_format: vk::Format,
+    samples: vk::SampleCountFlags,
+
+    vk: &'a VkContext,
 }
 
 pub struct TransientGraphicsCommandBuffer<'a> {
@@ -516,12 +523,12 @@ impl<'a> Swapchain<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
         command_pool: vk::CommandPool,
-        mut create_info: vk::SwapchainCreateInfoKHR,
+        render_pass: vk::RenderPass,
         depth_buffer_format: vk::Format,
         samples: vk::SampleCountFlags,
-        render_pass: vk::RenderPass,
         old_swapchain: Option<&Self>,
     ) -> Self {
+        let mut create_info = vk.physical_device.swapchain_create_info();
         if let Some(old) = old_swapchain {
             create_info.old_swapchain = old.swapchain.0;
             vk.device.device_wait_idle().unwrap();
@@ -542,15 +549,20 @@ impl<'a> Swapchain<'a> {
                 )
             })
             .collect();
-        let color_buffer = CommittedImage::new(
-            vk,
-            create_info.image_format,
-            create_info.image_extent,
-            1,
-            samples,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            vk::ImageAspectFlags::COLOR,
-        );
+        let msaa_on = samples != vk::SampleCountFlags::TYPE_1;
+        let color_buffer = if msaa_on {
+            CommittedImage::new(
+                vk,
+                create_info.image_format,
+                create_info.image_extent,
+                1,
+                samples,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                vk::ImageAspectFlags::COLOR,
+            )
+        } else {
+            CommittedImage::default()
+        };
         let depth_buffer = vk.create_depth_buffer(
             command_pool,
             depth_buffer_format,
@@ -560,7 +572,11 @@ impl<'a> Swapchain<'a> {
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = [color_buffer.view.0, depth_buffer.view.0, iv.0];
+                let attachments = if msaa_on {
+                    vec![color_buffer.view.0, depth_buffer.view.0, iv.0]
+                } else {
+                    vec![iv.0, depth_buffer.view.0]
+                };
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(render_pass)
@@ -577,36 +593,34 @@ impl<'a> Swapchain<'a> {
             _depth_buffer: depth_buffer,
             _image_views: image_views,
             swapchain,
+            command_pool,
+            render_pass,
+            extent: create_info.image_extent,
+            depth_buffer_format,
+            samples,
+            vk,
         }
     }
 
-    pub unsafe fn reinit(
-        &mut self,
-        vk: &'a VkContext,
-        command_pool: vk::CommandPool,
-        create_info: &mut vk::SwapchainCreateInfoKHR,
-        depth_buffer_format: vk::Format,
-        samples: vk::SampleCountFlags,
-        render_pass: vk::RenderPass,
-    ) {
-        let capabilities = vk
+    pub unsafe fn reinit(&mut self) {
+        let capabilities = self
+            .vk
             .instance_ext_surface
             .get_physical_device_surface_capabilities(
-                vk.physical_device.physical_device,
-                vk.physical_device.surface,
+                self.vk.physical_device.physical_device,
+                self.vk.physical_device.surface,
             )
             .unwrap();
-        create_info.image_extent = capabilities.current_extent;
-        if create_info.image_extent.width == 0 || create_info.image_extent.height == 0 {
+        let extent = capabilities.current_extent;
+        if extent.width == 0 || extent.height == 0 {
             return;
         }
         let mut new = Self::new(
-            vk,
-            command_pool,
-            *create_info,
-            depth_buffer_format,
-            samples,
-            render_pass,
+            self.vk,
+            self.command_pool,
+            self.render_pass,
+            self.depth_buffer_format,
+            self.samples,
             Some(self),
         );
         mem::swap(self, &mut new);
