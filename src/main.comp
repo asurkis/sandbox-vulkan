@@ -1,6 +1,6 @@
 #version 450
 
-#define PARTICLE_COUNT (1 << 17)
+#define PARTICLE_COUNT (1 << 16)
 
 layout (binding = 0) readonly buffer InPosSSBO {
     vec2 in_pos[];

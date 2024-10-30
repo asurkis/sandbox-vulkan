@@ -15,8 +15,8 @@ use std::mem;
 use std::slice;
 use std::u64;
 
-const MAX_CONCURRENT_FRAMES: usize = 2;
-const PARTICLE_COUNT: usize = 1 << 17;
+const MAX_CONCURRENT_FRAMES: usize = 4;
+const PARTICLE_COUNT: usize = 1 << 16;
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
@@ -249,7 +249,7 @@ fn main() {
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [1.0, 0.75, 0.5, 0.0],
+                        float32: [0.0; 4],
                     },
                 },
                 vk::ClearValue {
