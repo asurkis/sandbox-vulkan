@@ -1,26 +1,17 @@
 mod bootstrap;
 mod math;
+mod state;
 mod vkbox;
 
-use ash::vk;
-use ash::vk::BufferUsageFlags;
-use bootstrap::CommittedBuffer;
-use bootstrap::CommittedImage;
-use bootstrap::SdlContext;
-use bootstrap::Swapchain;
-use bootstrap::VkContext;
-use image::EncodableLayout;
-use math::mat4;
-use math::vec2;
-use math::vec3;
-use math::Vector;
-use sdl2::event::Event;
-use std::ffi::CStr;
-use std::mem;
-use std::ptr;
-use std::slice;
-use std::time;
-use std::u64;
+use {
+    ash::vk::{self, BufferUsageFlags},
+    bootstrap::{CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext},
+    image::EncodableLayout,
+    math::{mat4, vec2, vec3, Vector},
+    sdl2::event::Event,
+    state::StateBox,
+    std::{ffi::CStr, mem, ptr, slice, time, u64},
+};
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
 
@@ -42,6 +33,8 @@ struct Vertex {
 
 fn main() {
     unsafe {
+        let mut state = StateBox::load("state.json".into());
+
         let mut sdl = SdlContext::new();
         let vk = VkContext::new(&sdl);
 
@@ -91,7 +84,7 @@ fn main() {
         let pipeline = PipelineBox::new(&vk, render_pass.0, msaa_sample_count);
 
         let mut imgui = imgui::Context::create();
-        imgui.set_ini_filename(None);
+        // imgui.set_ini_filename(None);
         let mut imgui_sdl = imgui_sdl2_support::SdlPlatform::new(&mut imgui);
         let mut imgui_renderer = imgui_rs_vulkan_renderer::Renderer::with_default_allocator(
             &vk.instance,
@@ -214,8 +207,6 @@ fn main() {
         let mut frame_in_flight_index = 0;
 
         let mut time_prev = time::Instant::now();
-        let mut angle_deg = 0.0f32;
-        let mut turn_speed = 0.0;
 
         'main_loop: loop {
             imgui_sdl.prepare_frame(&mut imgui, &sdl.window, &sdl.event_pump);
@@ -244,23 +235,16 @@ fn main() {
 
             let ui = imgui.new_frame();
             ui.window("Info").build(|| {
-                ui.slider("Turn speed", -1.0, 1.0, &mut turn_speed);
-                ui.slider("Angle", -180.0, 180.0, &mut angle_deg);
+                ui.slider("Turn speed", -360.0, 360.0, &mut state.turn_speed);
+                ui.slider("Angle", -180.0, 180.0, &mut state.angle_deg);
             });
 
             let time_elapsed = time_curr - time_prev;
             let nanos = time_elapsed.as_secs() * 1_000_000_000 + time_elapsed.subsec_nanos() as u64;
-            let angle_deg_delta = 360.0e-9 * nanos as f32;
-            angle_deg += turn_speed * angle_deg_delta;
-            while angle_deg > 180.0 {
-                angle_deg -= 360.0;
-            }
-            while angle_deg < -180.0 {
-                angle_deg += 360.0;
-            }
+            state.update(nanos);
             time_prev = time_curr;
 
-            let (sin, cos) = angle_deg.to_radians().sin_cos();
+            let (sin, cos) = state.angle_deg.to_radians().sin_cos();
 
             let cam_pos = Vector([sin, 1.0, cos]);
             let look_at = Vector([0.0; 3]);
@@ -352,10 +336,7 @@ fn main() {
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.0)
                 .framebuffer(swapchain.framebuffers[image_index as usize].0)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: swapchain.extent,
-                })
+                .render_area(swapchain.extent.into())
                 .clear_values(&clear_values);
             let viewports = [vk::Viewport {
                 x: 0.0,
@@ -365,10 +346,7 @@ fn main() {
                 min_depth: 0.0,
                 max_depth: 1.0,
             }];
-            let scissors = [vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: swapchain.extent,
-            }];
+            let scissors = [swapchain.extent.into()];
             vk.device
                 .cmd_set_viewport(cur_command_buffer, 0, &viewports);
             vk.device.cmd_set_scissor(cur_command_buffer, 0, &scissors);
@@ -440,8 +418,6 @@ fn main() {
         }
 
         vk.device.device_wait_idle().unwrap();
-
-        vk.device.destroy_pipeline(pipeline.pipeline, None);
     }
 }
 
@@ -536,11 +512,19 @@ unsafe fn create_render_pass(
     vkbox::RenderPass::new(vk, &create_info)
 }
 
-#[derive(Debug)]
 struct PipelineBox<'a> {
     pipeline: vk::Pipeline,
     layout: vkbox::PipelineLayout<'a>,
     descriptor_set_layout: vkbox::DescriptorSetLayout<'a>,
+    vk: &'a VkContext,
+}
+
+impl<'a> Drop for PipelineBox<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            self.vk.device.destroy_pipeline(self.pipeline, None);
+        }
+    }
 }
 
 impl<'a> PipelineBox<'a> {
@@ -665,6 +649,7 @@ impl<'a> PipelineBox<'a> {
             pipeline: pipelines[0],
             layout,
             descriptor_set_layout,
+            vk,
         }
     }
 }

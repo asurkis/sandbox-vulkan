@@ -1,11 +1,12 @@
-use crate::vkbox;
-use ash::vk;
-use ash::vk::Handle;
-use std::collections::HashSet;
-use std::ffi::CStr;
-use std::ffi::CString;
-use std::mem;
-use std::ptr;
+use {
+    crate::vkbox,
+    ash::vk::{self, Handle},
+    std::{
+        collections::HashSet,
+        ffi::{CStr, CString},
+        mem, ptr,
+    },
+};
 
 pub struct SdlContext {
     pub event_pump: sdl2::EventPump,
