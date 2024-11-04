@@ -1,19 +1,18 @@
+use super::VkContext;
+
 macro_rules! declare_box {
     ($typ:ident, $device:ident, $create_info_ty:ident, $create_fn:ident, $destroy_fn:ident) => {
         #[derive(Default)]
-        pub struct $typ<'a>(pub ::ash::vk::$typ, Option<&'a crate::bootstrap::VkContext>);
+        pub struct $typ<'a>(pub ::ash::vk::$typ, Option<&'a VkContext>);
 
         impl<'a> $typ<'a> {
             #[allow(unused)]
-            pub unsafe fn new(
-                vk: &'a crate::bootstrap::VkContext,
-                create_info: &::ash::vk::$create_info_ty,
-            ) -> Self {
+            pub unsafe fn new(vk: &'a VkContext, create_info: &::ash::vk::$create_info_ty) -> Self {
                 Self(vk.$device.$create_fn(create_info, None).unwrap(), Some(vk))
             }
 
             #[allow(unused)]
-            pub fn wrap(vk: &'a crate::bootstrap::VkContext, x: ::ash::vk::$typ) -> Self {
+            pub fn wrap(vk: &'a VkContext, x: ::ash::vk::$typ) -> Self {
                 Self(x, Some(vk))
             }
 

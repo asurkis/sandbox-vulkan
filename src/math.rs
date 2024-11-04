@@ -1,46 +1,19 @@
-use std::fmt::Debug;
-use std::ops::Add;
-use std::ops::AddAssign;
-use std::ops::Div;
-use std::ops::DivAssign;
-use std::ops::Mul;
-use std::ops::MulAssign;
-use std::ops::Neg;
-use std::ops::Sub;
-use std::ops::SubAssign;
-
-pub trait Scalar:
-    Debug
-    + Copy
-    + Default
-    + Add<Output = Self>
-    + Mul<Output = Self>
-    + Sub<Output = Self>
-    + Div<Output = Self>
-    + AddAssign
-    + MulAssign
-    + SubAssign
-    + DivAssign
-{
-}
+use {
+    serde::{Deserialize, Serialize},
+    std::{
+        fmt::Debug,
+        ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    },
+};
 
 #[derive(Clone, Copy, Debug)]
-pub struct Vector<T: Scalar, const N: usize>(pub [T; N]);
+pub struct Vector<T: Copy, const N: usize>(pub [T; N]);
 
 #[derive(Clone, Copy, Debug)]
-pub struct Matrix<T: Scalar, const N: usize, const M: usize>(
+pub struct Matrix<T: Copy, const N: usize, const M: usize>(
     // Column-first to coerce with vector
     pub [[T; N]; M],
 );
-
-impl Scalar for f32 {}
-impl Scalar for f64 {}
-impl Scalar for i16 {}
-impl Scalar for i32 {}
-impl Scalar for i64 {}
-impl Scalar for u16 {}
-impl Scalar for u32 {}
-impl Scalar for u64 {}
 
 #[allow(unused, non_camel_case_types)]
 pub type vec2 = Vector<f32, 2>;
@@ -61,7 +34,7 @@ pub type mat4 = mat4x4;
 
 macro_rules! impl_scalar_op {
     ($trait:ident, $op:ident) => {
-        impl<T: Scalar, const N: usize> ::std::ops::$trait<T> for Vector<T, N> {
+        impl<T: Copy + $trait<Output = T>, const N: usize> $trait<T> for Vector<T, N> {
             type Output = Self;
             fn $op(mut self, rhs: T) -> Self {
                 for i in 0..N {
@@ -71,7 +44,9 @@ macro_rules! impl_scalar_op {
             }
         }
 
-        impl<T: Scalar, const N: usize, const M: usize> ::std::ops::$trait<T> for Matrix<T, N, M> {
+        impl<T: Copy + $trait<Output = T>, const N: usize, const M: usize> $trait<T>
+            for Matrix<T, N, M>
+        {
             type Output = Self;
             fn $op(mut self, rhs: T) -> Self {
                 for col in 0..M {
@@ -87,7 +62,7 @@ macro_rules! impl_scalar_op {
 
 macro_rules! impl_op {
     ($trait:ident, $op:ident) => {
-        impl<T: Scalar, const N: usize> ::std::ops::$trait for Vector<T, N> {
+        impl<T: Copy + $trait<Output = T>, const N: usize> $trait for Vector<T, N> {
             type Output = Self;
             fn $op(mut self, rhs: Self) -> Self {
                 for i in 0..N {
@@ -97,7 +72,9 @@ macro_rules! impl_op {
             }
         }
 
-        impl<T: Scalar, const N: usize, const M: usize> ::std::ops::$trait for Matrix<T, N, M> {
+        impl<T: Copy + $trait<Output = T>, const N: usize, const M: usize> $trait
+            for Matrix<T, N, M>
+        {
             type Output = Self;
             fn $op(mut self, rhs: Self) -> Self {
                 for col in 0..M {
@@ -113,7 +90,7 @@ macro_rules! impl_op {
 
 macro_rules! impl_op_assign {
     ($trait:ident, $op:ident) => {
-        impl<T: Scalar, const N: usize> ::std::ops::$trait for Vector<T, N> {
+        impl<T: Copy + $trait, const N: usize> $trait for Vector<T, N> {
             fn $op(&mut self, rhs: Self) {
                 for i in 0..N {
                     self.0[i].$op(rhs.0[i]);
@@ -121,7 +98,7 @@ macro_rules! impl_op_assign {
             }
         }
 
-        impl<T: Scalar, const N: usize, const M: usize> ::std::ops::$trait for Matrix<T, N, M> {
+        impl<T: Copy + $trait, const N: usize, const M: usize> $trait for Matrix<T, N, M> {
             fn $op(&mut self, rhs: Self) {
                 for col in 0..M {
                     for row in 0..N {
@@ -160,7 +137,7 @@ macro_rules! impl_fty {
     };
 }
 
-impl<T: Scalar + Neg<Output = T>, const N: usize> Neg for Vector<T, N> {
+impl<T: Copy + Neg<Output = T>, const N: usize> Neg for Vector<T, N> {
     type Output = Self;
     fn neg(mut self) -> Self {
         for i in 0..N {
@@ -188,13 +165,38 @@ impl_op_assign!(DivAssign, div_assign);
 impl_fty!(f32);
 impl_fty!(f64);
 
-impl<T: Scalar, const N: usize> Default for Vector<T, N> {
+impl<T: Copy + Default, const N: usize> Default for Vector<T, N> {
     fn default() -> Self {
         Self([T::default(); N])
     }
 }
 
-impl<T: Scalar, const N: usize> Vector<T, N> {
+impl<T: Copy, const N: usize> Serialize for Vector<T, N>
+where
+    [T; N]: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, T: Copy, const N: usize> Deserialize<'de> for Vector<T, N>
+where
+    [T; N]: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let arr = <[T; N] as Deserialize<'de>>::deserialize(deserializer)?;
+        Ok(Self(arr))
+    }
+}
+
+impl<T: Copy, const N: usize> Vector<T, N> {
     #[allow(unused)]
     pub fn x(&self) -> T {
         if N < 1 {
@@ -258,7 +260,9 @@ impl<T: Scalar, const N: usize> Vector<T, N> {
         }
         &mut self.0[3]
     }
+}
 
+impl<T: Copy + Default + AddAssign + Mul<Output = T>, const N: usize> Vector<T, N> {
     #[allow(unused)]
     pub fn dot(self, rhs: Self) -> T {
         let mut sum = T::default();
@@ -269,7 +273,7 @@ impl<T: Scalar, const N: usize> Vector<T, N> {
     }
 }
 
-impl<T: Scalar> Vector<T, 3> {
+impl<T: Copy + Sub<Output = T> + Mul<Output = T>> Vector<T, 3> {
     #[allow(unused)]
     pub fn cross(self, rhs: Self) -> Self {
         Self([
@@ -280,13 +284,38 @@ impl<T: Scalar> Vector<T, 3> {
     }
 }
 
-impl<T: Scalar, const N: usize, const M: usize> Default for Matrix<T, N, M> {
+impl<T: Copy + Default, const N: usize, const M: usize> Default for Matrix<T, N, M> {
     fn default() -> Self {
         Self([[T::default(); N]; M])
     }
 }
 
-impl<T: Scalar, const N: usize, const M: usize> Matrix<T, N, M> {
+impl<T: Copy, const N: usize, const M: usize> Serialize for Matrix<T, N, M>
+where
+    [[T; N]; M]: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, T: Copy, const N: usize, const M: usize> Deserialize<'de> for Matrix<T, N, M>
+where
+    [[T; N]; M]: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let arr = <[[T; N]; M] as Deserialize<'de>>::deserialize(deserializer)?;
+        Ok(Self(arr))
+    }
+}
+
+impl<T: Copy + Default, const N: usize, const M: usize> Matrix<T, N, M> {
     #[allow(unused)]
     pub fn transpose(&self) -> Matrix<T, M, N> {
         let mut result = Matrix::default();
@@ -297,7 +326,11 @@ impl<T: Scalar, const N: usize, const M: usize> Matrix<T, N, M> {
         }
         result
     }
+}
 
+impl<T: Copy + Default + Mul<Output = T> + AddAssign, const N: usize, const M: usize>
+    Matrix<T, N, M>
+{
     #[allow(unused)]
     pub fn dot<const K: usize>(&self, rhs: &Matrix<T, M, K>) -> Matrix<T, N, K> {
         let mut result = Matrix::default();
@@ -322,7 +355,7 @@ impl<T: Scalar, const N: usize, const M: usize> Matrix<T, N, M> {
     }
 }
 
-impl<T: Scalar, const N: usize> Matrix<T, N, N> {
+impl<T: Copy, const N: usize> Matrix<T, N, N> {
     #[allow(unused)]
     pub fn transpose_inplace(&mut self) {
         for col in 0..N {
@@ -333,25 +366,25 @@ impl<T: Scalar, const N: usize> Matrix<T, N, N> {
     }
 }
 
-impl<T: Scalar, const N: usize> From<T> for Vector<T, N> {
+impl<T: Copy, const N: usize> From<T> for Vector<T, N> {
     fn from(value: T) -> Self {
         Self([value; N])
     }
 }
 
-impl<T: Scalar, const N: usize, const M: usize> From<T> for Matrix<T, N, M> {
+impl<T: Copy, const N: usize, const M: usize> From<T> for Matrix<T, N, M> {
     fn from(value: T) -> Self {
         Self([[value; N]; M])
     }
 }
 
-impl<T: Scalar, const N: usize> From<Matrix<T, N, 1>> for Vector<T, N> {
+impl<T: Copy, const N: usize> From<Matrix<T, N, 1>> for Vector<T, N> {
     fn from(value: Matrix<T, N, 1>) -> Self {
         Self(value.0[0])
     }
 }
 
-impl<T: Scalar, const N: usize> From<Vector<T, N>> for Matrix<T, N, 1> {
+impl<T: Copy, const N: usize> From<Vector<T, N>> for Matrix<T, N, 1> {
     fn from(value: Vector<T, N>) -> Self {
         Matrix([value.0])
     }

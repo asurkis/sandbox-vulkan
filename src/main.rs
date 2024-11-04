@@ -1,16 +1,15 @@
-mod bootstrap;
 mod math;
 mod state;
-mod vkbox;
+mod vklib;
 
 use {
     ash::vk::{self, BufferUsageFlags},
-    bootstrap::{CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext},
     image::EncodableLayout,
     math::{mat4, vec2, vec3, Vector},
     sdl2::event::Event,
     state::StateBox,
     std::{ffi::CStr, mem, ptr, slice, time, u64},
+    vklib::{vkbox, CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext},
 };
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
@@ -36,7 +35,7 @@ fn main() {
         let mut state = StateBox::load("state.json".into());
 
         let mut sdl = SdlContext::new();
-        let vk = VkContext::new(&sdl);
+        let vk = VkContext::new(&sdl.window);
 
         let physical_device_props = vk
             .instance
@@ -235,6 +234,7 @@ fn main() {
 
             let ui = imgui.new_frame();
             ui.window("Info").build(|| {
+                ui.text(format!("FPS: {}", ui.io().framerate));
                 ui.slider("Turn speed", -360.0, 360.0, &mut state.turn_speed);
                 ui.slider("Angle", -180.0, 180.0, &mut state.angle_deg);
             });
