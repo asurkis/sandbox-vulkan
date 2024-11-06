@@ -1,12 +1,10 @@
-use {
-    serde_derive::{Deserialize, Serialize},
-    std::{
-        error::Error,
-        fs::File,
-        io::{BufReader, BufWriter},
-        ops::{Deref, DerefMut},
-        path::{Path, PathBuf},
-    },
+use serde_derive::{Deserialize, Serialize};
+use std::{
+    error::Error,
+    fs::File,
+    io::{BufReader, BufWriter},
+    ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

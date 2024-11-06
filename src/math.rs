@@ -1,9 +1,7 @@
-use {
-    serde::{Deserialize, Serialize},
-    std::{
-        fmt::Debug,
-        ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
-    },
+use serde::{Deserialize, Serialize};
+use std::{
+    fmt::Debug,
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
 #[derive(Clone, Copy, Debug)]

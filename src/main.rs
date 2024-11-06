@@ -1,16 +1,16 @@
 mod math;
+mod voxel_bintree;
 mod state;
 mod vklib;
 
-use {
-    ash::vk::{self, BufferUsageFlags},
-    image::EncodableLayout,
-    math::{mat4, vec2, vec3, Vector},
-    sdl2::event::Event,
-    state::StateBox,
-    std::{ffi::CStr, mem, ptr, slice, time, u64},
-    vklib::{vkbox, CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext},
-};
+use ash::vk::{self, BufferUsageFlags};
+use image::EncodableLayout;
+use math::{mat4, vec2, vec3, Vector};
+use sdl2::event::Event;
+use voxel_bintree::VoxelBintree;
+use state::StateBox;
+use std::{ffi::CStr, mem, ptr, slice, time, u64};
+use vklib::{vkbox, CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext};
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
 
@@ -31,6 +31,13 @@ struct Vertex {
 }
 
 fn main() {
+    let mut st = VoxelBintree::new();
+    for i in 0..5 {
+        st.set(i, 1);
+    }
+    dbg!(&st);
+    return;
+
     unsafe {
         let mut state = StateBox::load("state.json".into());
 
