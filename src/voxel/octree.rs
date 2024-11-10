@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::math::{vec3, Vector};
 
@@ -34,6 +34,7 @@ impl Node {
         self.children[0] == !0
     }
 
+    #[allow(unused)]
     fn is_branch(&self) -> bool {
         !self.is_leaf()
     }
@@ -49,10 +50,12 @@ impl Octree {
         }
     }
 
+    #[allow(unused)]
     pub fn get(&self, offset: [usize; 3]) -> usize {
         self.sample(offset, 0)
     }
 
+    #[allow(unused)]
     pub fn sample(&self, [x, y, z]: [usize; 3], log_extent: usize) -> usize {
         if x.max(y).max(z) >= 1 << self.log_extent {
             return !0;
@@ -142,6 +145,68 @@ impl Octree {
         }
     }
 
+    pub fn shrinked(&self) -> Self {
+        let mut reindex = vec![!0; self.nodes.len()];
+        let mut next_index = 0;
+        let mut queue = VecDeque::new();
+        queue.push_back(self.root);
+        while let Some(i_node) = queue.pop_front() {
+            reindex[i_node] = next_index;
+            next_index += 1;
+            for j_node in self.nodes[i_node].children {
+                if j_node != !0 {
+                    queue.push_back(j_node);
+                }
+            }
+        }
+
+        let mut nodes = vec![Node::default(); next_index];
+        for i_node in 0..self.nodes.len() {
+            let mut node = self.nodes[i_node];
+            let ri_node = reindex[i_node];
+            if ri_node == !0 {
+                continue;
+            }
+            for j_node in &mut node.children {
+                if *j_node != !0 {
+                    *j_node = reindex[*j_node];
+                }
+            }
+            nodes[ri_node] = node;
+        }
+        Self {
+            nodes,
+            free_nodes: Vec::new(),
+            root: 0,
+            log_extent: self.log_extent,
+        }
+    }
+
+    pub fn shrink(&mut self) {
+        *self = self.shrinked();
+    }
+
+    pub fn gpu_data(&self) -> Vec<u32> {
+        assert!(self.free_nodes.is_empty());
+        assert!(self.root == 0);
+        let mut out = Vec::with_capacity(12 * self.nodes.len() + 4);
+        out.push(self.log_extent as _);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        for i_node in 0..self.nodes.len() {
+            let node = self.nodes[i_node];
+            out.push(node.voxel as _);
+            for _ in 1..4 {
+                out.push(0);
+            }
+            for j_node in node.children {
+                out.push(j_node as _);
+            }
+        }
+        out
+    }
+
     fn new_leaf(&mut self, voxel: usize) -> usize {
         let i = match self.free_nodes.pop() {
             Some(i) => i,
@@ -216,6 +281,7 @@ impl Octree {
         }
     }
 
+    #[allow(unused)]
     pub fn debug_mesh(&self) -> (Vec<u32>, Vec<vec3>) {
         let mut indices = Vec::new();
         let mut vertices = Vec::new();

@@ -140,7 +140,9 @@ impl VkContext {
                 .queue_priorities(&queue_priority);
         }
         let enabled_extension_names_raw = [ash::khr::swapchain::NAME.as_ptr()];
-        let enabled_features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+        let enabled_features = vk::PhysicalDeviceFeatures::default()
+            .sampler_anisotropy(true)
+            .fill_mode_non_solid(true);
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&enabled_extension_names_raw)

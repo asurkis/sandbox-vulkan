@@ -2,15 +2,13 @@ mod math;
 mod state;
 mod vklib;
 mod voxel;
-mod voxel_bintree;
 
 use ash::vk::{self, BufferUsageFlags};
-use image::EncodableLayout;
-use math::{mat4, vec2, vec3, Vector};
+use math::{mat4, Vector};
 use sdl2::event::Event;
 use state::StateBox;
 use std::{ffi::CStr, mem, ptr, slice, time, u64};
-use vklib::{vkbox, CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext};
+use vklib::{vkbox, CommittedBuffer, SdlContext, Swapchain, VkContext};
 use voxel::octree::Octree;
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
@@ -25,15 +23,24 @@ struct UniformData {
     mat_view_proj: mat4,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Vertex {
-    pos: vec3,
-    // texcoord: vec2,
-}
-
 fn main() {
     let mut tree = Octree::new();
-    tree.set([0; 3], [8; 3], 0);
+    for x in -15..16 {
+        dbg!(x);
+        for y in -15..16 {
+            for z in -15..16 {
+                let r2 = x * x + y * y + z * z;
+                let off = [(x + 16) as _, (y + 16) as _, (z + 16) as _];
+                if r2 <= 16 * 16 {
+                    tree.set(off, [1; 3], 0);
+                } else {
+                    tree.set(off, [1; 3], !0);
+                }
+            }
+        }
+    }
+    // tree.set([0; 3], [16; 3], 0);
+    tree.shrink();
 
     unsafe {
         let mut state = StateBox::load("state.json".into());
@@ -107,81 +114,15 @@ fn main() {
         )
         .unwrap();
 
-        /*
-        let (meshes, _) = tobj::load_obj(
-            "assets/viking_room.obj",
-            &tobj::LoadOptions {
-                ignore_lines: true,
-                single_index: true,
-                triangulate: true,
-                ignore_points: true,
-            },
-        )
-        .unwrap();
-        let mesh = &meshes[0].mesh;
-        let n_indices = mesh.indices.len();
-        let n_vertices = mesh.positions.len() / 3;
-        let mut vertex_buffer_data = Vec::with_capacity(n_vertices);
-        for i in 0..n_vertices {
-            vertex_buffer_data.push(Vertex {
-                pos: Vector([
-                    mesh.positions[3 * i + 0],
-                    mesh.positions[3 * i + 2],
-                    mesh.positions[3 * i + 1],
-                ]),
-                texcoord: Vector([mesh.texcoords[2 * i + 0], 1.0 - mesh.texcoords[2 * i + 1]]),
-            });
-        }
-        let index_buffer = CommittedBuffer::upload(
-            &vk,
-            command_pool_transient.0,
-            &mesh.indices,
-            BufferUsageFlags::INDEX_BUFFER,
-        );
-        let vertex_buffer = CommittedBuffer::upload(
-            &vk,
-            command_pool_transient.0,
-            &vertex_buffer_data,
-            BufferUsageFlags::VERTEX_BUFFER,
-        );
-        let _ = meshes;
-        let _ = vertex_buffer_data;
-        */
-
-        let (index_data, vertex_data) = tree.debug_mesh();
-        let index_buffer = CommittedBuffer::upload(
-            &vk,
-            command_pool_transient.0,
-            &index_data,
-            BufferUsageFlags::INDEX_BUFFER,
-        );
-        let vertex_buffer = CommittedBuffer::upload(
-            &vk,
-            command_pool_transient.0,
-            &vertex_data,
-            BufferUsageFlags::VERTEX_BUFFER,
-        );
-        let n_indices = index_data.len();
-        let _ = index_data;
-        let _ = vertex_data;
-
-        let texture = {
-            let texture_data = image::ImageReader::open("assets/viking_room.png")
-                .unwrap()
-                .decode()
-                .unwrap()
-                .to_rgba8();
-            CommittedImage::upload(
+        let voxel_buffer = {
+            let voxel_data = tree.gpu_data();
+            CommittedBuffer::upload(
                 &vk,
                 command_pool_transient.0,
-                vk::Extent2D {
-                    width: texture_data.width(),
-                    height: texture_data.height(),
-                },
-                &texture_data.as_bytes(),
+                &voxel_data,
+                BufferUsageFlags::STORAGE_BUFFER,
             )
         };
-        let texture_sampler = vk.create_sampler();
 
         let mut uniform_data = UniformData::default();
         let uniform_data_size = mem::size_of_val(&uniform_data);
@@ -221,9 +162,8 @@ fn main() {
             &vk,
             descriptor_pool.0,
             pipeline.descriptor_set_layout.0,
-            texture_sampler.0,
-            texture.view.0,
             &uniform_buffers,
+            voxel_buffer.buffer.0,
         );
 
         let mut frame_in_flight_index = 0;
@@ -285,28 +225,22 @@ fn main() {
             let cam_right = cam_forward.cross(world_up).normalize();
             let cam_down = cam_forward.cross(cam_right);
 
-            let mut mat_transform = mat4::identity();
-            mat_transform.0[3][0] = -cam_pos.x();
-            mat_transform.0[3][1] = -cam_pos.y();
-            mat_transform.0[3][2] = -cam_pos.z();
-
             uniform_data.mat_view.0[0][0] = cam_right.x();
             uniform_data.mat_view.0[1][0] = cam_right.y();
             uniform_data.mat_view.0[2][0] = cam_right.z();
-            uniform_data.mat_view.0[3][0] = 0.0;
+            uniform_data.mat_view.0[3][0] = -cam_right.dot(cam_pos);
             uniform_data.mat_view.0[0][1] = cam_down.x();
             uniform_data.mat_view.0[1][1] = cam_down.y();
             uniform_data.mat_view.0[2][1] = cam_down.z();
-            uniform_data.mat_view.0[3][1] = 0.0;
+            uniform_data.mat_view.0[3][1] = -cam_down.dot(cam_pos);
             uniform_data.mat_view.0[0][2] = cam_forward.x();
             uniform_data.mat_view.0[1][2] = cam_forward.y();
             uniform_data.mat_view.0[2][2] = cam_forward.z();
-            uniform_data.mat_view.0[3][2] = 0.0;
+            uniform_data.mat_view.0[3][2] = -cam_forward.dot(cam_pos);
             uniform_data.mat_view.0[0][3] = 0.0;
             uniform_data.mat_view.0[1][3] = 0.0;
             uniform_data.mat_view.0[2][3] = 0.0;
             uniform_data.mat_view.0[3][3] = 1.0;
-            uniform_data.mat_view.dot_assign(&mat_transform);
 
             uniform_data.mat_proj = mat4::identity();
             uniform_data.mat_proj.0[0][0] =
@@ -392,18 +326,6 @@ fn main() {
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.pipeline,
             );
-            vk.device.cmd_bind_vertex_buffers(
-                cur_command_buffer,
-                0,
-                &[vertex_buffer.buffer.0],
-                &[0],
-            );
-            vk.device.cmd_bind_index_buffer(
-                cur_command_buffer,
-                index_buffer.buffer.0,
-                0,
-                vk::IndexType::UINT32,
-            );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -412,8 +334,7 @@ fn main() {
                 slice::from_ref(&cur_descriptor_set),
                 &[],
             );
-            vk.device
-                .cmd_draw_indexed(cur_command_buffer, n_indices as _, 1, 0, 0, 0);
+            vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
 
             imgui_renderer
                 .cmd_draw(cur_command_buffer, imgui.render())
@@ -578,28 +499,9 @@ impl<'a> PipelineBox<'a> {
                 .module(shader_module_frag.0)
                 .name(CStr::from_bytes_with_nul(b"main\0").unwrap()),
         ];
-        let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: mem::size_of::<Vertex>() as _,
-            input_rate: vk::VertexInputRate::VERTEX,
-        }];
-        let vertex_attribute_descriptions = [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32B32_SFLOAT,
-                offset: mem::offset_of!(Vertex, pos) as _,
-            },
-            // vk::VertexInputAttributeDescription {
-            //     location: 1,
-            //     binding: 0,
-            //     format: vk::Format::R32G32_SFLOAT,
-            //     offset: mem::offset_of!(Vertex, texcoord) as _,
-            // },
-        ];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&vertex_binding_descriptions)
-            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
+            .vertex_binding_descriptions(&[])
+            .vertex_attribute_descriptions(&[]);
         let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let viewports = [vk::Viewport::default()];
@@ -608,7 +510,7 @@ impl<'a> PipelineBox<'a> {
             .viewports(&viewports)
             .scissors(&scissors);
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::LINE)
+            .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::BACK)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
@@ -648,7 +550,7 @@ impl<'a> PipelineBox<'a> {
                 .stage_flags(vk::ShaderStageFlags::VERTEX),
             vk::DescriptorSetLayoutBinding::default()
                 .binding(1)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         ];
@@ -708,9 +610,8 @@ unsafe fn create_descriptor_sets(
     vk: &VkContext,
     descriptor_pool: vk::DescriptorPool,
     layout: vk::DescriptorSetLayout,
-    texture_sampler: vk::Sampler,
-    texture_view: vk::ImageView,
     uniform_buffers: &[CommittedBuffer],
+    storage_buffer: vk::Buffer,
 ) -> Vec<vk::DescriptorSet> {
     let set_layouts = [layout; MAX_CONCURRENT_FRAMES];
     let allocate_info = vk::DescriptorSetAllocateInfo::default()
@@ -718,15 +619,15 @@ unsafe fn create_descriptor_sets(
         .set_layouts(&set_layouts);
     let sets = vk.device.allocate_descriptor_sets(&allocate_info).unwrap();
     for i in 0..MAX_CONCURRENT_FRAMES {
-        let buffer_info = [vk::DescriptorBufferInfo {
+        let uniform_buffer_info = [vk::DescriptorBufferInfo {
             buffer: uniform_buffers[i].buffer.0,
             offset: 0,
             range: mem::size_of::<UniformData>() as _,
         }];
-        let image_info = [vk::DescriptorImageInfo {
-            sampler: texture_sampler,
-            image_view: texture_view,
-            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        let storage_buffer_info = [vk::DescriptorBufferInfo {
+            buffer: storage_buffer,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
         }];
         let descriptor_writes = [
             vk::WriteDescriptorSet::default()
@@ -734,13 +635,13 @@ unsafe fn create_descriptor_sets(
                 .dst_binding(0)
                 .dst_array_element(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&buffer_info),
+                .buffer_info(&uniform_buffer_info),
             vk::WriteDescriptorSet::default()
                 .dst_set(sets[i])
                 .dst_binding(1)
                 .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&image_info),
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&storage_buffer_info),
         ];
         vk.device.update_descriptor_sets(&descriptor_writes, &[]);
     }
