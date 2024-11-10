@@ -7,8 +7,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::math::{vec2, vec3, Vector};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
+    pub orbit_center: vec3,
+    pub orbit_distance: vec2,
     pub angle_deg: f32,
     pub turn_speed: f32,
 }
@@ -22,6 +26,8 @@ pub struct StateBox {
 impl Default for State {
     fn default() -> Self {
         Self {
+            orbit_center: Vector([0.0; 3]),
+            orbit_distance: Vector([1.0; 2]),
             angle_deg: 0.0,
             turn_speed: 0.0,
         }

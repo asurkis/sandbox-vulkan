@@ -1,16 +1,17 @@
 mod math;
-mod voxel_bintree;
 mod state;
 mod vklib;
+mod voxel;
+mod voxel_bintree;
 
 use ash::vk::{self, BufferUsageFlags};
 use image::EncodableLayout;
 use math::{mat4, vec2, vec3, Vector};
 use sdl2::event::Event;
-use voxel_bintree::VoxelBintree;
 use state::StateBox;
 use std::{ffi::CStr, mem, ptr, slice, time, u64};
 use vklib::{vkbox, CommittedBuffer, CommittedImage, SdlContext, Swapchain, VkContext};
+use voxel::octree::Octree;
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
 
@@ -27,16 +28,12 @@ struct UniformData {
 #[derive(Clone, Copy, Debug, Default)]
 struct Vertex {
     pos: vec3,
-    texcoord: vec2,
+    // texcoord: vec2,
 }
 
 fn main() {
-    let mut st = VoxelBintree::new();
-    for i in 0..5 {
-        st.set(i, 1);
-    }
-    dbg!(&st);
-    return;
+    let mut tree = Octree::new();
+    tree.set([0; 3], [8; 3], 0);
 
     unsafe {
         let mut state = StateBox::load("state.json".into());
@@ -110,6 +107,7 @@ fn main() {
         )
         .unwrap();
 
+        /*
         let (meshes, _) = tobj::load_obj(
             "assets/viking_room.obj",
             &tobj::LoadOptions {
@@ -148,6 +146,24 @@ fn main() {
         );
         let _ = meshes;
         let _ = vertex_buffer_data;
+        */
+
+        let (index_data, vertex_data) = tree.debug_mesh();
+        let index_buffer = CommittedBuffer::upload(
+            &vk,
+            command_pool_transient.0,
+            &index_data,
+            BufferUsageFlags::INDEX_BUFFER,
+        );
+        let vertex_buffer = CommittedBuffer::upload(
+            &vk,
+            command_pool_transient.0,
+            &vertex_data,
+            BufferUsageFlags::VERTEX_BUFFER,
+        );
+        let n_indices = index_data.len();
+        let _ = index_data;
+        let _ = vertex_data;
 
         let texture = {
             let texture_data = image::ImageReader::open("assets/viking_room.png")
@@ -242,6 +258,10 @@ fn main() {
             let ui = imgui.new_frame();
             ui.window("Info").build(|| {
                 ui.text(format!("FPS: {}", ui.io().framerate));
+                ui.input_float3("Orbit center", &mut state.orbit_center.0)
+                    .build();
+                ui.input_float2("Orbit distance", &mut state.orbit_distance.0)
+                    .build();
                 ui.slider("Turn speed", -360.0, 360.0, &mut state.turn_speed);
                 ui.slider("Angle", -180.0, 180.0, &mut state.angle_deg);
             });
@@ -253,8 +273,13 @@ fn main() {
 
             let (sin, cos) = state.angle_deg.to_radians().sin_cos();
 
-            let cam_pos = Vector([sin, 1.0, cos]);
-            let look_at = Vector([0.0; 3]);
+            let cam_pos = state.orbit_center
+                + Vector([
+                    sin * state.orbit_distance.x(),
+                    state.orbit_distance.y(),
+                    cos * state.orbit_distance.x(),
+                ]);
+            let look_at = state.orbit_center;
             let world_up = Vector([0.0, 1.0, 0.0]);
             let cam_forward = (look_at - cam_pos).normalize();
             let cam_right = cam_forward.cross(world_up).normalize();
@@ -565,12 +590,12 @@ impl<'a> PipelineBox<'a> {
                 format: vk::Format::R32G32B32_SFLOAT,
                 offset: mem::offset_of!(Vertex, pos) as _,
             },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32_SFLOAT,
-                offset: mem::offset_of!(Vertex, texcoord) as _,
-            },
+            // vk::VertexInputAttributeDescription {
+            //     location: 1,
+            //     binding: 0,
+            //     format: vk::Format::R32G32_SFLOAT,
+            //     offset: mem::offset_of!(Vertex, texcoord) as _,
+            // },
         ];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_binding_descriptions)
@@ -583,9 +608,9 @@ impl<'a> PipelineBox<'a> {
             .viewports(&viewports)
             .scissors(&scissors);
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
+            .polygon_mode(vk::PolygonMode::LINE)
             .cull_mode(vk::CullModeFlags::BACK)
-            .front_face(vk::FrontFace::CLOCKWISE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(rasterization_samples);

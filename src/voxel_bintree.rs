@@ -1,5 +1,3 @@
-const HIGHEST_BIT: u32 = !(!0 >> 1);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Node {
     Leaf(usize),
