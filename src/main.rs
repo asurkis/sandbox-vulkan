@@ -24,23 +24,29 @@ struct UniformData {
 }
 
 fn main() {
-    let mut tree = Octree::new();
-    for x in -7..8 {
-        dbg!(x);
-        for y in -7..8 {
-            for z in -7..8 {
-                let r2 = x * x + y * y + z * z;
-                let off = [(x + 8) as _, (y + 8) as _, (z + 8) as _];
-                if r2 <= 8 * 8 {
-                    tree.set(off, [1; 3], 0);
-                } else {
-                    tree.set(off, [1; 3], !0);
+    let tree = {
+        const LOG_RADIUS: i32 = 5;
+        const RADIUS: i32 = 1 << LOG_RADIUS;
+        const DIAMETER: i32 = 2 * RADIUS;
+        let mut voxels = vec![0; (DIAMETER * DIAMETER * DIAMETER) as _];
+        for x in 0..DIAMETER {
+            for y in 0..DIAMETER {
+                for z in 0..DIAMETER {
+                    let dx = x - RADIUS;
+                    let dy = y - RADIUS;
+                    let dz = z - RADIUS;
+                    let r2 = dx * dx + dy * dy + dz * dz;
+                    let i_vox = (DIAMETER * (DIAMETER * z + y) + x) as usize;
+                    if r2 < RADIUS * RADIUS {
+                        voxels[i_vox] = 0;
+                    } else {
+                        voxels[i_vox] = !0;
+                    }
                 }
             }
         }
-    }
-    // tree.set([0; 3], [16; 3], 0);
-    tree.shrink();
+        Octree::from_voxels(&voxels)
+    };
 
     unsafe {
         let mut state = StateBox::load("state.json".into());

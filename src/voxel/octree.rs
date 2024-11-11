@@ -2,13 +2,13 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::math::{vec3, Vector};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Node {
     voxel: usize,
     children: [usize; 8],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Octree {
     nodes: Vec<Node>,
     free_nodes: Vec<usize>,
@@ -48,6 +48,46 @@ impl Octree {
             root: 0,
             log_extent: 0,
         }
+    }
+
+    pub fn from_voxels(voxels: &[usize]) -> Self {
+        let mut log_extent = 0;
+        while 1 << (3 * log_extent) < voxels.len() {
+            log_extent += 1;
+        }
+        if 1 << (3 * log_extent) > voxels.len() {
+            panic!("Array size is not a precise 8^n");
+        }
+        let mut n_nodes = 0;
+        for i in 0..=log_extent {
+            n_nodes += 1 << (3 * i);
+        }
+        let mut self_ = Self {
+            nodes: vec![Node::default(); n_nodes],
+            free_nodes: Vec::new(),
+            root: 0,
+            log_extent,
+        };
+
+        let leaf_off = n_nodes - (1 << (3 * log_extent));
+        for (i_voxel, &voxel) in voxels.iter().enumerate() {
+            let x = ((1 << log_extent) - 1) & i_voxel;
+            let y = ((1 << log_extent) - 1) & (i_voxel >> log_extent);
+            let z = ((1 << log_extent) - 1) & (i_voxel >> (2 * log_extent));
+            let mut i_leaf = 0;
+            for i in 0..log_extent {
+                i_leaf |= (((x >> i) & 1) | (((y >> i) & 1) << 1) | (((z >> i) & 1) << 2)) << (3 * i);
+            }
+            let i_node = i_leaf + leaf_off;
+            self_.nodes[i_node].voxel = voxel;
+        }
+        for i_node in (0..leaf_off).rev() {
+            for i_child in 0..8 {
+                self_.nodes[i_node].children[i_child] = 8 * i_node + 1 + i_child;
+            }
+            self_.merge_branch(i_node);
+        }
+        self_.shrinked()
     }
 
     #[allow(unused)]
@@ -133,16 +173,7 @@ impl Octree {
                 node_log_extent - 1,
             );
         }
-
-        // merge branch
-        let mut all_leaf = true;
-        for j_node in self.nodes[i_node].children {
-            all_leaf &= self.nodes[j_node].is_leaf() && self.nodes[j_node].voxel == voxel;
-        }
-        if all_leaf {
-            self.drop_children(i_node);
-            self.nodes[i_node].voxel = voxel;
-        }
+        self.merge_branch(i_node);
     }
 
     pub fn shrinked(&self) -> Self {
@@ -236,6 +267,20 @@ impl Octree {
             let i_new_leaf = self.new_leaf(voxel);
             self.nodes[i_node].children[i] = i_new_leaf;
         }
+    }
+
+    fn merge_branch(&mut self, i_node: usize) {
+        let v = self.nodes[i_node];
+        assert!(v.is_branch());
+        let voxel = self.nodes[v.children[0]].voxel;
+        self.nodes[i_node].voxel = voxel;
+        for j_node in v.children {
+            let u = &self.nodes[j_node];
+            if u.is_branch() || u.voxel != voxel {
+                return;
+            }
+        }
+        self.drop_children(i_node);
     }
 
     pub fn debug_boxes(&self) -> Vec<([usize; 3], usize)> {
