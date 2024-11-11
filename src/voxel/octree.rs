@@ -68,7 +68,7 @@ impl Octree {
                 return node.voxel;
             }
             node_log_extent -= 1;
-            let dix = ((x >> node_log_extent) & 1) << 0;
+            let dix = ((x >> node_log_extent) & 1);
             let diy = ((y >> node_log_extent) & 1) << 1;
             let diz = ((z >> node_log_extent) & 1) << 2;
             i_node = node.children[dix | diy | diz];
@@ -98,8 +98,8 @@ impl Octree {
         i_node: usize,
         node_log_extent: usize,
     ) {
-        for i in 0..3 {
-            if extent[i] == 0 {
+        for ei in extent {
+            if ei == 0 {
                 return;
             }
         }
@@ -189,19 +189,13 @@ impl Octree {
     pub fn gpu_data(&self) -> Vec<u32> {
         assert!(self.free_nodes.is_empty());
         assert!(self.root == 0);
-        let mut out = Vec::with_capacity(12 * self.nodes.len() + 4);
-        out.push(self.log_extent as _);
-        out.push(0);
-        out.push(0);
-        out.push(0);
+        let mut out = vec![0; 4 + 12 * self.nodes.len()];
+        out[0] = self.log_extent as _;
         for i_node in 0..self.nodes.len() {
             let node = self.nodes[i_node];
-            out.push(node.voxel as _);
-            for _ in 1..4 {
-                out.push(0);
-            }
-            for j_node in node.children {
-                out.push(j_node as _);
+            out[4 + 12 * i_node] = node.voxel as _;
+            for (i_child, &j_node) in node.children.iter().enumerate() {
+                out[8 + 12 * i_node + i_child] = j_node as _;
             }
         }
         out
@@ -266,9 +260,9 @@ impl Octree {
             let half_extent = 1 << (node_log_extent - 1);
             for i_child in 0..8 {
                 let mut next_offset = offset;
-                for i in 0..3 {
+                for (i, no) in next_offset.iter_mut().enumerate() {
                     if i_child & (1 << i) != 0 {
-                        next_offset[i] += half_extent;
+                        *no += half_extent;
                     }
                 }
                 self.debug_boxes_descend(

@@ -7,7 +7,7 @@ use ash::vk::{self, BufferUsageFlags};
 use math::{mat4, Vector};
 use sdl2::event::Event;
 use state::StateBox;
-use std::{ffi::CStr, mem, ptr, slice, time, u64};
+use std::{ffi::CStr, mem, ptr, slice, time};
 use vklib::{vkbox, CommittedBuffer, SdlContext, Swapchain, VkContext};
 use voxel::octree::Octree;
 
@@ -25,13 +25,13 @@ struct UniformData {
 
 fn main() {
     let mut tree = Octree::new();
-    for x in -15..16 {
+    for x in -7..8 {
         dbg!(x);
-        for y in -15..16 {
-            for z in -15..16 {
+        for y in -7..8 {
+            for z in -7..8 {
                 let r2 = x * x + y * y + z * z;
-                let off = [(x + 16) as _, (y + 16) as _, (z + 16) as _];
-                if r2 <= 16 * 16 {
+                let off = [(x + 8) as _, (y + 8) as _, (z + 8) as _];
+                if r2 <= 8 * 8 {
                     tree.set(off, [1; 3], 0);
                 } else {
                     tree.set(off, [1; 3], !0);
@@ -256,7 +256,9 @@ fn main() {
             let cur_descriptor_set = descriptor_sets[frame_in_flight_index];
 
             ptr::copy(
-                mem::transmute(&uniform_data as *const _),
+                mem::transmute::<*const UniformData, *const std::ffi::c_void>(
+                    &uniform_data as *const _,
+                ),
                 cur_uniform_mapping,
                 uniform_data_size,
             );

@@ -45,6 +45,7 @@ impl<'a> CommittedImage<'a> {
         }
     }
 
+    #[allow(unused)]
     pub unsafe fn upload(
         vk: &'a VkContext,
         command_pool: vk::CommandPool,

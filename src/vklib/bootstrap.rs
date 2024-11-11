@@ -228,6 +228,7 @@ impl VkContext {
         vkbox::Semaphore::new(self, &create_info)
     }
 
+    #[allow(unused)]
     pub unsafe fn create_sampler(&self) -> vkbox::Sampler {
         let physical_device_properties = self
             .instance
@@ -269,9 +270,8 @@ impl VkContext {
         let mut code_safe = Vec::with_capacity((bytecode.len() + 3) / 4);
         for i in (0..bytecode.len()).step_by(4) {
             let mut arr = [0; 4];
-            for j in i..bytecode.len().min(i + 4) {
-                arr[j - i] = bytecode[j];
-            }
+            let end = bytecode.len().min(i + 4);
+            arr[..end - i].copy_from_slice(&bytecode[i..end]);
             let u = u32::from_ne_bytes(arr);
             code_safe.push(u);
         }
@@ -389,8 +389,10 @@ impl PhysicalDeviceContext {
     ) -> Self {
         let physical_device_list = instance.enumerate_physical_devices().unwrap();
         for pd in physical_device_list {
-            let mut info = Self::default();
-            info.physical_device = pd;
+            let mut info = Self {
+                physical_device: pd,
+                ..Default::default()
+            };
 
             let device_features = instance.get_physical_device_features(pd);
             if device_features.sampler_anisotropy == 0 {
@@ -410,8 +412,7 @@ impl PhysicalDeviceContext {
             let queue_family_properties = instance.get_physical_device_queue_family_properties(pd);
             let mut has_graphics = false;
             let mut has_present = false;
-            for i in 0..queue_family_properties.len() {
-                let prop = queue_family_properties[i];
+            for (i, prop) in queue_family_properties.iter().enumerate() {
                 let graphics_flags =
                     vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER;
                 if prop.queue_flags & graphics_flags == graphics_flags {

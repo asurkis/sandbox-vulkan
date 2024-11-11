@@ -46,7 +46,11 @@ impl<'a> CommittedBuffer<'a> {
                 vk::MemoryMapFlags::empty(),
             )
             .unwrap();
-        ptr::copy(mem::transmute(data.as_ptr()), memmap, data_size);
+        ptr::copy(
+            mem::transmute::<*const T, *const std::ffi::c_void>(data.as_ptr()),
+            memmap,
+            data_size,
+        );
         vk.device.unmap_memory(staging.memory.0);
         staging
     }
