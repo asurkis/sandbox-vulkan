@@ -46,7 +46,7 @@ vec3 palette_color(uint i) {
 
 vec3 ray_dir;
 
-bool scan_cube(in vec3 offset, in float extent, out float dist, out vec3 hit_pos, out vec3 hit_color) {
+bool scan_cube(in vec3 offset, in float extent, out float hit_dist, out vec3 hit_pos, out vec3 hit_color) {
     vec3 proj_min_v = (in_cam_pos - offset) / -ray_dir;
     vec3 proj_max_v = (in_cam_pos - offset - extent) / -ray_dir;
     for (int i = 0; i < 3; ++i) {
@@ -60,11 +60,12 @@ bool scan_cube(in vec3 offset, in float extent, out float dist, out vec3 hit_pos
 
     float proj_min = max(max(proj_min_v.x, proj_min_v.y), proj_min_v.z);
     float proj_max = min(min(proj_max_v.x, proj_max_v.y), proj_max_v.z);
-    if (proj_min < 0) return false;
+    proj_min = max(proj_min, 0);
+    // if (proj_min < 0) return false;
     if (proj_min > proj_max) return false;
 
-    dist = proj_min;
-    hit_pos = in_cam_pos + dist * ray_dir;
+    hit_dist = proj_min;
+    hit_pos = in_cam_pos + hit_dist * ray_dir;
     hit_color = normalize(hit_pos);
     return true;
 }
@@ -83,26 +84,10 @@ bool descend_octree(out vec3 hit_pos, out vec3 hit_color) {
     bool found_something = false;
     float best_dist = 0;
 
-    // for (uint z = 0; z < 4; ++z) {
-    //     for (uint y = 0; y < 4; ++y) {
-    //         for (uint x = 0; x < 4; ++x) {
-    //             float cur_dist;
-    //             vec3 cur_hit_pos, dummy;
-    //             if (scan_cube(vec3(x, y, z), 1, cur_dist, cur_hit_pos, dummy)) {
-    //                 if (!found_something || cur_dist < best_dist) {
-    //                     best_dist = cur_dist;
-    //                     found_something = true;
-    //                     hit_pos = cur_hit_pos;
-    //                     hit_color = palette_color(16 * z + 4 * y + x);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-
-    // return found_something;
+    uint dbg_n_samples = 0;
 
     while (stack_len > 0) {
+        ++dbg_n_samples;
         --stack_len;
         uint i_node = stack_node_id[stack_len];
         uint node_log_extent = stack_log_extent[stack_len];
@@ -114,33 +99,47 @@ bool descend_octree(out vec3 hit_pos, out vec3 hit_color) {
             continue;
         }
 
-        // if (node_log_extent == 0) {
+        if (found_something && best_dist < node_dist) {
+            continue;
+        }
+
         if (tree.nodes[i_node].children_packed[0].x == ~0u) {
             // leaf
-            // if (length(node_offset - 8) < 8) {
             if (tree.nodes[i_node].voxel != ~0u) {
-                if (!found_something || node_dist < best_dist) {
-                    hit_pos = node_hit_pos;
-                    hit_color = palette_color(i_node);
-                    best_dist = node_dist;
-                    found_something = true;
-                }
+                hit_pos = node_hit_pos;
+                hit_color = palette_color(i_node);
+                best_dist = node_dist;
+                found_something = true;
             }
         } else {
             // branch
-            for (int i_child = 0; i_child < 8; ++i_child) {
-                stack_node_id[stack_len] = tree.nodes[i_node].children_packed[(i_child >> 2) & 1][i_child & 3];
+            bool below_center[3];
+            int half_extent = 1 << (node_log_extent - 1);
+            vec3 center = node_offset + vec3(half_extent);
+            for (int i_coord = 0; i_coord < 3; ++i_coord) {
+                below_center[i_coord] = in_cam_pos[i_coord] < center[i_coord];
+            }
+            for (int ii_child = 0; ii_child < 8; ++ii_child) {
+                int i_child = ii_child;
+                for (int i_coord = 0; i_coord < 3; ++i_coord) {
+                    if (below_center[i_coord]) {
+                        i_child ^= 1 << i_coord;
+                    }
+                }
+                stack_node_id[stack_len] = tree.nodes[i_node].children_packed[i_child >> 2][i_child & 3];
                 stack_log_extent[stack_len] = node_log_extent - 1;
                 stack_offset[stack_len] = node_offset;
-                for (int i = 0; i < 3; ++i) {
-                    if ((i_child & (1 << i)) != 0) {
-                        stack_offset[stack_len][i] += 1 << (node_log_extent - 1);
+                for (int i_coord = 0; i_coord < 3; ++i_coord) {
+                    if ((i_child & (1 << i_coord)) != 0) {
+                        stack_offset[stack_len][i_coord] += half_extent;
                     }
                 }
                 ++stack_len;
             }
         }
     }
+
+    hit_color = vec3(float(dbg_n_samples) / float(2 * STACK_CAP));
     return found_something;
 }
 
@@ -149,8 +148,8 @@ void main() {
 
     vec3 hit_pos, color;
     if (descend_octree(hit_pos, color)) {
-        out_color = vec4(0.5 * color + 0.5, 1);
+        out_color = vec4(color, 1);
     } else {
-        out_color = vec4(0.5 * ray_dir + 0.5, 1);
+        out_color = vec4(color, 1);
     }
 }

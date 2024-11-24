@@ -25,19 +25,19 @@ struct UniformData {
 
 fn main() {
     let tree = {
-        const LOG_RADIUS: i32 = 4;
+        const LOG_RADIUS: i32 = 6;
         const RADIUS: i32 = 1 << LOG_RADIUS;
         const DIAMETER: i32 = 2 * RADIUS;
         let mut voxels = vec![0; (DIAMETER * DIAMETER * DIAMETER) as _];
-        for x in 0..DIAMETER {
+        for z in 0..DIAMETER {
             for y in 0..DIAMETER {
-                for z in 0..DIAMETER {
-                    let dx = x - RADIUS;
-                    let dy = y - RADIUS;
-                    let dz = z - RADIUS;
+                for x in 0..DIAMETER {
+                    let i_vox = ((z * DIAMETER + y) * DIAMETER + x) as usize;
+                    let dx = 2 * x + 1 - 2 * RADIUS;
+                    let dy = 2 * y + 1 - 2 * RADIUS;
+                    let dz = 2 * z + 1 - 2 * RADIUS;
                     let r2 = dx * dx + dy * dy + dz * dz;
-                    let i_vox = (DIAMETER * (DIAMETER * z + y) + x) as usize;
-                    if r2 < RADIUS * RADIUS {
+                    if r2 < 4 * RADIUS * RADIUS {
                         voxels[i_vox] = 0;
                     } else {
                         voxels[i_vox] = !0;
