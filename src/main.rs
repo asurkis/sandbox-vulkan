@@ -25,7 +25,7 @@ struct UniformData {
 
 fn main() {
     let tree = {
-        const LOG_RADIUS: i32 = 5;
+        const LOG_RADIUS: i32 = 4;
         const RADIUS: i32 = 1 << LOG_RADIUS;
         const DIAMETER: i32 = 2 * RADIUS;
         let mut voxels = vec![0; (DIAMETER * DIAMETER * DIAMETER) as _];
@@ -48,9 +48,9 @@ fn main() {
         Octree::from_voxels(&voxels)
     };
 
-    unsafe {
-        let mut state = StateBox::load("state.json".into());
+    let mut state = StateBox::load("state.json".into());
 
+    unsafe {
         let mut sdl = SdlContext::new();
         let vk = VkContext::new(&sdl.window);
 

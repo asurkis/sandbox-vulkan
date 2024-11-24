@@ -41,6 +41,7 @@ impl Node {
 }
 
 impl Octree {
+    #[allow(unused)]
     pub fn new() -> Self {
         Self {
             nodes: vec![Node::default()],
@@ -48,6 +49,21 @@ impl Octree {
             root: 0,
             log_extent: 0,
         }
+    }
+
+    #[allow(unused)]
+    pub fn capacity(&self) -> usize {
+        self.nodes.len()
+    }
+
+    #[allow(unused)]
+    pub fn extent(&self) -> usize {
+        1 << self.log_extent
+    }
+
+    #[allow(unused)]
+    pub fn log_extent(&self) -> usize {
+        self.log_extent
     }
 
     pub fn from_voxels(voxels: &[usize]) -> Self {
@@ -76,7 +92,8 @@ impl Octree {
             let z = ((1 << log_extent) - 1) & (i_voxel >> (2 * log_extent));
             let mut i_leaf = 0;
             for i in 0..log_extent {
-                i_leaf |= (((x >> i) & 1) | (((y >> i) & 1) << 1) | (((z >> i) & 1) << 2)) << (3 * i);
+                i_leaf |=
+                    (((x >> i) & 1) | (((y >> i) & 1) << 1) | (((z >> i) & 1) << 2)) << (3 * i);
             }
             let i_node = i_leaf + leaf_off;
             self_.nodes[i_node].voxel = voxel;
@@ -115,6 +132,7 @@ impl Octree {
         }
     }
 
+    #[allow(unused)]
     pub fn set(&mut self, [x, y, z]: [usize; 3], [ex, ey, ez]: [usize; 3], voxel: usize) {
         let needed_extent = (x + ex).max(y + ey).max(z + ez);
         while needed_extent > 1 << self.log_extent {
@@ -130,6 +148,7 @@ impl Octree {
         self.set_descend([x, y, z], [ex, ey, ez], voxel, self.root, self.log_extent);
     }
 
+    #[allow(unused)]
     fn set_descend(
         &mut self,
         offset: [usize; 3],
@@ -213,6 +232,7 @@ impl Octree {
         }
     }
 
+    #[allow(unused)]
     pub fn shrink(&mut self) {
         *self = self.shrinked();
     }
@@ -232,6 +252,7 @@ impl Octree {
         out
     }
 
+    #[allow(unused)]
     fn new_leaf(&mut self, voxel: usize) -> usize {
         let i = match self.free_nodes.pop() {
             Some(i) => i,
@@ -260,6 +281,7 @@ impl Octree {
         self.nodes[i_node].children = [!0; 8];
     }
 
+    #[allow(unused)]
     fn split_leaf(&mut self, i_node: usize) {
         assert!(self.nodes[i_node].is_leaf());
         let voxel = self.nodes[i_node].voxel;
@@ -404,9 +426,10 @@ fn vertex_index(
     vertices: &mut Vec<vec3>,
     key: [usize; 3],
 ) -> usize {
+    use std::collections::hash_map::Entry;
     match index_of.entry(key) {
-        std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-        std::collections::hash_map::Entry::Vacant(v) => {
+        Entry::Occupied(o) => *o.get(),
+        Entry::Vacant(v) => {
             let i = vertices.len();
             v.insert(i);
             vertices.push(Vector([key[0] as f32, key[1] as f32, key[2] as f32]));
