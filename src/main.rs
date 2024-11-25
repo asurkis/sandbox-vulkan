@@ -8,17 +8,14 @@ use ash::vk::{self, BufferUsageFlags};
 use math::{mat4, Vector};
 use sdl2::event::Event;
 use state::StateBox;
-use std::{ffi::CStr, mem, ptr, slice, time};
+use std::{mem, ptr, slice, time};
 use vkapp::{
     create_descriptor_pool, create_descriptor_sets, create_render_pass, PipelineBox, Swapchain,
 };
-use vklib::{vkbox, CommittedBuffer, SdlContext, VkContext};
+use vklib::{CommittedBuffer, SdlContext, VkContext};
 use voxel::octree::Octree;
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
-
-const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
-const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
 
 #[derive(Clone, Copy, Debug, Default)]
 struct UniformData {
@@ -58,29 +55,7 @@ fn main() {
         let mut sdl = SdlContext::new();
         let vk = VkContext::new(&sdl.window);
 
-        let physical_device_props = vk
-            .instance
-            .get_physical_device_properties(vk.physical_device.physical_device);
-        let mut msaa_sample_count = vk::SampleCountFlags::TYPE_1;
-        for candidate in [
-            vk::SampleCountFlags::TYPE_64,
-            vk::SampleCountFlags::TYPE_32,
-            vk::SampleCountFlags::TYPE_16,
-            vk::SampleCountFlags::TYPE_8,
-            vk::SampleCountFlags::TYPE_4,
-            vk::SampleCountFlags::TYPE_2,
-            vk::SampleCountFlags::TYPE_1,
-        ] {
-            if candidate
-                & physical_device_props.limits.framebuffer_color_sample_counts
-                & physical_device_props.limits.framebuffer_depth_sample_counts
-                == candidate
-            {
-                msaa_sample_count = candidate;
-                break;
-            }
-        }
-
+        let msaa_sample_count = vk.select_msaa_samples();
         let depth_buffer_format = vk.select_image_format(
             &[
                 vk::Format::D32_SFLOAT,
