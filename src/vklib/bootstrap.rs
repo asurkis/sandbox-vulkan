@@ -163,6 +163,30 @@ impl VkContext {
         panic!("No fitting format found");
     }
 
+    pub unsafe fn select_msaa_samples(&self) -> vk::SampleCountFlags {
+        let physical_device_props = self
+            .instance
+            .get_physical_device_properties(self.physical_device.physical_device);
+        for candidate in [
+            vk::SampleCountFlags::TYPE_64,
+            vk::SampleCountFlags::TYPE_32,
+            vk::SampleCountFlags::TYPE_16,
+            vk::SampleCountFlags::TYPE_8,
+            vk::SampleCountFlags::TYPE_4,
+            vk::SampleCountFlags::TYPE_2,
+            vk::SampleCountFlags::TYPE_1,
+        ] {
+            if candidate
+                & physical_device_props.limits.framebuffer_color_sample_counts
+                & physical_device_props.limits.framebuffer_depth_sample_counts
+                == candidate
+            {
+                return candidate;
+            }
+        }
+        vk::SampleCountFlags::TYPE_1
+    }
+
     pub unsafe fn find_memory_type(
         &self,
         memory_requirements: vk::MemoryRequirements,

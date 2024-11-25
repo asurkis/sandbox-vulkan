@@ -1,4 +1,4 @@
-use super::{bootstrap::VkContext, vkbox, CommittedImage};
+use crate::vklib::{VkContext, vkbox, CommittedImage};
 use ash::vk;
 use std::{mem, ptr};
 
@@ -62,12 +62,17 @@ impl<'a> Swapchain<'a> {
         } else {
             CommittedImage::default()
         };
-        let depth_buffer = vk.create_depth_buffer(
-            command_pool,
-            depth_buffer_format,
-            create_info.image_extent,
-            samples,
-        );
+        let depth_buffer_on = depth_buffer_format != vk::Format::UNDEFINED;
+        let depth_buffer = if depth_buffer_on {
+            vk.create_depth_buffer(
+                command_pool,
+                depth_buffer_format,
+                create_info.image_extent,
+                samples,
+            )
+        } else {
+            CommittedImage::default()
+        };
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
