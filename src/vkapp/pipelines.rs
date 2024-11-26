@@ -1,26 +1,20 @@
-use crate::vklib::{vkbox, VkContext};
+use crate::{
+    vklib::{vkbox, VkContext},
+    Vertex,
+};
 use ash::vk;
-use std::{ffi::CStr, slice};
+use std::{ffi::CStr, mem, slice};
 
 const BYTECODE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
 
-pub struct PipelineBox<'a> {
-    pub pipeline: vk::Pipeline,
+pub struct Pipelines<'a> {
+    pub pipeline: vkbox::Pipeline<'a>,
     pub layout: vkbox::PipelineLayout<'a>,
     pub descriptor_set_layout: vkbox::DescriptorSetLayout<'a>,
-    vk: &'a VkContext,
 }
 
-impl<'a> Drop for PipelineBox<'a> {
-    fn drop(&mut self) {
-        unsafe {
-            self.vk.device.destroy_pipeline(self.pipeline, None);
-        }
-    }
-}
-
-impl<'a> PipelineBox<'a> {
+impl<'a> Pipelines<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
         render_pass: vk::RenderPass,
@@ -39,9 +33,28 @@ impl<'a> PipelineBox<'a> {
                 .module(shader_module_frag.0)
                 .name(CStr::from_bytes_with_nul(b"main\0").unwrap()),
         ];
+        let vertex_binding_descriptions = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: mem::size_of::<Vertex>() as _,
+            input_rate: vk::VertexInputRate::VERTEX,
+        }];
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: mem::offset_of!(Vertex, pos) as _,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32B32_SFLOAT,
+                offset: mem::offset_of!(Vertex, norm) as _,
+            },
+        ];
         let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&[])
-            .vertex_attribute_descriptions(&[]);
+            .vertex_binding_descriptions(&vertex_binding_descriptions)
+            .vertex_attribute_descriptions(&vertex_attribute_descriptions);
         let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
         let viewports = [vk::Viewport::default()];
@@ -57,12 +70,12 @@ impl<'a> PipelineBox<'a> {
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(rasterization_samples);
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState {
-            blend_enable: vk::FALSE,
-            src_color_blend_factor: vk::BlendFactor::ONE,
-            dst_color_blend_factor: vk::BlendFactor::ZERO,
+            blend_enable: vk::TRUE,
+            src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
+            dst_color_blend_factor: vk::BlendFactor::ONE,
             color_blend_op: vk::BlendOp::ADD,
-            src_alpha_blend_factor: vk::BlendFactor::ONE,
-            dst_alpha_blend_factor: vk::BlendFactor::ZERO,
+            src_alpha_blend_factor: vk::BlendFactor::SRC_ALPHA,
+            dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
             alpha_blend_op: vk::BlendOp::ADD,
             color_write_mask: vk::ColorComponentFlags::A
                 | vk::ColorComponentFlags::B
@@ -71,8 +84,8 @@ impl<'a> PipelineBox<'a> {
         }];
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
             .flags(vk::PipelineDepthStencilStateCreateFlags::empty())
-            .depth_test_enable(true)
-            .depth_write_enable(true)
+            // .depth_test_enable(true)
+            // .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
@@ -120,10 +133,9 @@ impl<'a> PipelineBox<'a> {
             .unwrap();
 
         Self {
-            pipeline: pipelines[0],
+            pipeline: vkbox::Pipeline::wrap(vk, pipelines[0]),
             layout,
             descriptor_set_layout,
-            vk,
         }
     }
 }

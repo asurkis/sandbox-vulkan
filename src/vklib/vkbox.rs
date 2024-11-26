@@ -1,16 +1,11 @@
 use super::VkContext;
 
 macro_rules! declare_box {
-    ($typ:ident, $device:ident, $create_info_ty:ident, $create_fn:ident, $destroy_fn:ident) => {
+    ($typ:ident, $device:ident, $destroy_fn:ident) => {
         #[derive(Default)]
         pub struct $typ<'a>(pub ::ash::vk::$typ, Option<&'a VkContext>);
 
         impl<'a> $typ<'a> {
-            #[allow(unused)]
-            pub unsafe fn new(vk: &'a VkContext, create_info: &::ash::vk::$create_info_ty) -> Self {
-                Self(vk.$device.$create_fn(create_info, None).unwrap(), Some(vk))
-            }
-
             #[allow(unused)]
             pub fn wrap(vk: &'a VkContext, x: ::ash::vk::$typ) -> Self {
                 Self(x, Some(vk))
@@ -34,21 +29,26 @@ macro_rules! declare_box {
         }
 
         impl ::std::fmt::Debug for $typ<'_> {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 self.0.fmt(f)
+            }
+        }
+    };
+
+    ($typ:ident, $device:ident, $create_info_ty:ident, $create_fn:ident, $destroy_fn:ident) => {
+        declare_box!($typ, $device, $destroy_fn);
+
+        impl<'a> $typ<'a> {
+            #[allow(unused)]
+            pub unsafe fn new(vk: &'a VkContext, create_info: &::ash::vk::$create_info_ty) -> Self {
+                Self(vk.$device.$create_fn(create_info, None).unwrap(), Some(vk))
             }
         }
     };
 }
 
-declare_box!(Fence, device, FenceCreateInfo, create_fence, destroy_fence);
-declare_box!(
-    Semaphore,
-    device,
-    SemaphoreCreateInfo,
-    create_semaphore,
-    destroy_semaphore
-);
+declare_box!(Pipeline, device, destroy_pipeline);
+
 declare_box!(
     Buffer,
     device,
@@ -56,55 +56,12 @@ declare_box!(
     create_buffer,
     destroy_buffer
 );
-declare_box!(Image, device, ImageCreateInfo, create_image, destroy_image);
 declare_box!(
     CommandPool,
     device,
     CommandPoolCreateInfo,
     create_command_pool,
     destroy_command_pool
-);
-declare_box!(
-    RenderPass,
-    device,
-    RenderPassCreateInfo,
-    create_render_pass,
-    destroy_render_pass
-);
-declare_box!(
-    ShaderModule,
-    device,
-    ShaderModuleCreateInfo,
-    create_shader_module,
-    destroy_shader_module
-);
-declare_box!(
-    ImageView,
-    device,
-    ImageViewCreateInfo,
-    create_image_view,
-    destroy_image_view
-);
-declare_box!(
-    Framebuffer,
-    device,
-    FramebufferCreateInfo,
-    create_framebuffer,
-    destroy_framebuffer
-);
-declare_box!(
-    DescriptorSetLayout,
-    device,
-    DescriptorSetLayoutCreateInfo,
-    create_descriptor_set_layout,
-    destroy_descriptor_set_layout
-);
-declare_box!(
-    PipelineLayout,
-    device,
-    PipelineLayoutCreateInfo,
-    create_pipeline_layout,
-    destroy_pipeline_layout
 );
 declare_box!(
     DescriptorPool,
@@ -114,11 +71,62 @@ declare_box!(
     destroy_descriptor_pool
 );
 declare_box!(
+    DescriptorSetLayout,
+    device,
+    DescriptorSetLayoutCreateInfo,
+    create_descriptor_set_layout,
+    destroy_descriptor_set_layout
+);
+declare_box!(Fence, device, FenceCreateInfo, create_fence, destroy_fence);
+declare_box!(
+    Framebuffer,
+    device,
+    FramebufferCreateInfo,
+    create_framebuffer,
+    destroy_framebuffer
+);
+declare_box!(Image, device, ImageCreateInfo, create_image, destroy_image);
+declare_box!(
+    ImageView,
+    device,
+    ImageViewCreateInfo,
+    create_image_view,
+    destroy_image_view
+);
+declare_box!(
+    PipelineLayout,
+    device,
+    PipelineLayoutCreateInfo,
+    create_pipeline_layout,
+    destroy_pipeline_layout
+);
+declare_box!(
+    RenderPass,
+    device,
+    RenderPassCreateInfo,
+    create_render_pass,
+    destroy_render_pass
+);
+declare_box!(
     Sampler,
     device,
     SamplerCreateInfo,
     create_sampler,
     destroy_sampler
+);
+declare_box!(
+    Semaphore,
+    device,
+    SemaphoreCreateInfo,
+    create_semaphore,
+    destroy_semaphore
+);
+declare_box!(
+    ShaderModule,
+    device,
+    ShaderModuleCreateInfo,
+    create_shader_module,
+    destroy_shader_module
 );
 
 declare_box!(

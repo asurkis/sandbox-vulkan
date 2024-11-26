@@ -5,12 +5,12 @@ mod vklib;
 mod voxel;
 
 use ash::vk::{self, BufferUsageFlags};
-use math::{mat4, Vector};
+use math::{mat4, vec3, Vector};
 use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
-    create_descriptor_pool, create_descriptor_sets, create_render_pass, PipelineBox, Swapchain,
+    create_descriptor_pool, create_descriptor_sets, create_render_pass, Pipelines, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 use voxel::octree::Octree;
@@ -24,8 +24,14 @@ struct UniformData {
     mat_view_proj: mat4,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct Vertex {
+    pos: vec3,
+    norm: vec3,
+}
+
 fn main() {
-    let tree = {
+    let (indices, vertices) = {
         const LOG_RADIUS: i32 = 6;
         const RADIUS: i32 = 1 << LOG_RADIUS;
         const DIAMETER: i32 = 2 * RADIUS;
@@ -46,7 +52,7 @@ fn main() {
                 }
             }
         }
-        Octree::from_voxels(&voxels)
+        Octree::from_voxels(&voxels).shrinked().debug_mesh()
     };
 
     let mut state = StateBox::load("state.json".into());
@@ -76,7 +82,7 @@ fn main() {
             msaa_sample_count,
             None,
         );
-        let pipeline = PipelineBox::new(&vk, render_pass.0, msaa_sample_count);
+        let pipelines = Pipelines::new(&vk, render_pass.0, msaa_sample_count);
 
         let mut imgui = imgui::Context::create();
         // imgui.set_ini_filename(None);
@@ -99,15 +105,18 @@ fn main() {
         )
         .unwrap();
 
-        let voxel_buffer = {
-            let voxel_data = tree.gpu_data();
-            CommittedBuffer::upload(
-                &vk,
-                command_pool_transient.0,
-                &voxel_data,
-                BufferUsageFlags::STORAGE_BUFFER,
-            )
-        };
+        let vertex_buffer = CommittedBuffer::upload(
+            &vk,
+            command_pool_transient.0,
+            &vertices,
+            BufferUsageFlags::VERTEX_BUFFER,
+        );
+        let index_buffer = CommittedBuffer::upload(
+            &vk,
+            command_pool_transient.0,
+            &indices,
+            BufferUsageFlags::INDEX_BUFFER,
+        );
 
         let mut uniform_data = UniformData::default();
         let uniform_data_size = mem::size_of_val(&uniform_data);
@@ -122,7 +131,7 @@ fn main() {
         for _ in 0..MAX_CONCURRENT_FRAMES {
             let uniform_buffer = CommittedBuffer::new(
                 &vk,
-                mem::size_of_val(&uniform_data) as _,
+                uniform_data_size as _,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             );
@@ -146,9 +155,8 @@ fn main() {
         let descriptor_sets = create_descriptor_sets(
             &vk,
             descriptor_pool.0,
-            pipeline.descriptor_set_layout.0,
+            pipelines.descriptor_set_layout.0,
             &uniform_buffers,
-            voxel_buffer.buffer.0,
         );
 
         let mut frame_in_flight_index = 0;
@@ -276,7 +284,8 @@ fn main() {
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [1.0, 0.75, 0.5, 0.0],
+                        // float32: [1.0, 0.75, 0.5, 0.0],
+                        float32: [0.0; 4],
                     },
                 },
                 vk::ClearValue {
@@ -311,17 +320,30 @@ fn main() {
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline.pipeline,
+                pipelines.pipeline.0,
             );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline.layout.0,
+                pipelines.layout.0,
                 0,
                 slice::from_ref(&cur_descriptor_set),
                 &[],
             );
-            vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
+            vk.device.cmd_bind_vertex_buffers(
+                cur_command_buffer,
+                0,
+                &[vertex_buffer.buffer.0],
+                &[0],
+            );
+            vk.device.cmd_bind_index_buffer(
+                cur_command_buffer,
+                index_buffer.buffer.0,
+                0,
+                vk::IndexType::UINT32,
+            );
+            vk.device
+                .cmd_draw_indexed(cur_command_buffer, indices.len() as _, 1, 0, 0, 0);
 
             imgui_renderer
                 .cmd_draw(cur_command_buffer, imgui.render())

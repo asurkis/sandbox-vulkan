@@ -1,6 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::math::{vec3, Vector};
+use crate::{
+    math::{vec3, Vector},
+    Vertex,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Node {
@@ -343,21 +346,12 @@ impl Octree {
     }
 
     #[allow(unused)]
-    pub fn debug_mesh(&self) -> (Vec<u32>, Vec<vec3>) {
+    pub fn debug_mesh(&self) -> (Vec<u32>, Vec<Vertex>) {
         let mut indices = Vec::new();
         let mut vertices = Vec::new();
         let mut index_of = HashMap::new();
 
         for ([x, y, z], e) in self.debug_boxes() {
-            let i0 = vertex_index(&mut index_of, &mut vertices, [x, y, z]);
-            let i1 = vertex_index(&mut index_of, &mut vertices, [x + e, y, z]);
-            let i2 = vertex_index(&mut index_of, &mut vertices, [x, y + e, z]);
-            let i3 = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z]);
-            let i4 = vertex_index(&mut index_of, &mut vertices, [x, y, z + e]);
-            let i5 = vertex_index(&mut index_of, &mut vertices, [x + e, y, z + e]);
-            let i6 = vertex_index(&mut index_of, &mut vertices, [x, y + e, z + e]);
-            let i7 = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z + e]);
-
             //    6--------7
             //   /|       /|
             //  / |      / |
@@ -369,52 +363,76 @@ impl Octree {
             // 0--------1
 
             // -Z
-            indices.push(i0 as _);
-            indices.push(i2 as _);
-            indices.push(i3 as _);
-            indices.push(i3 as _);
-            indices.push(i1 as _);
-            indices.push(i0 as _);
+            let i = vertex_index(&mut index_of, &mut vertices, [x, y, z, 0]);
+            let ii = vertex_index(&mut index_of, &mut vertices, [x + e, y, z, 0]);
+            let iii = vertex_index(&mut index_of, &mut vertices, [x, y + e, z, 0]);
+            let iv = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z, 0]);
+            indices.push(i as _);
+            indices.push(iii as _);
+            indices.push(iv as _);
+            indices.push(iv as _);
+            indices.push(ii as _);
+            indices.push(i as _);
 
             // +Z
-            indices.push(i4 as _);
-            indices.push(i5 as _);
-            indices.push(i7 as _);
-            indices.push(i7 as _);
-            indices.push(i6 as _);
-            indices.push(i4 as _);
+            let i = vertex_index(&mut index_of, &mut vertices, [x, y, z + e, 1]);
+            let ii = vertex_index(&mut index_of, &mut vertices, [x + e, y, z + e, 1]);
+            let iii = vertex_index(&mut index_of, &mut vertices, [x, y + e, z + e, 1]);
+            let iv = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z + e, 1]);
+            indices.push(i as _);
+            indices.push(ii as _);
+            indices.push(iv as _);
+            indices.push(iv as _);
+            indices.push(iii as _);
+            indices.push(i as _);
 
             // -Y
-            indices.push(i0 as _);
-            indices.push(i1 as _);
-            indices.push(i5 as _);
-            indices.push(i5 as _);
-            indices.push(i4 as _);
-            indices.push(i0 as _);
+            let i = vertex_index(&mut index_of, &mut vertices, [x, y, z, 2]);
+            let ii = vertex_index(&mut index_of, &mut vertices, [x + e, y, z, 2]);
+            let iii = vertex_index(&mut index_of, &mut vertices, [x, y, z + e, 2]);
+            let iv = vertex_index(&mut index_of, &mut vertices, [x + e, y, z + e, 2]);
+            indices.push(i as _);
+            indices.push(ii as _);
+            indices.push(iv as _);
+            indices.push(iv as _);
+            indices.push(iii as _);
+            indices.push(i as _);
 
             // +Y
-            indices.push(i2 as _);
-            indices.push(i6 as _);
-            indices.push(i7 as _);
-            indices.push(i7 as _);
-            indices.push(i3 as _);
-            indices.push(i2 as _);
+            let i = vertex_index(&mut index_of, &mut vertices, [x, y + e, z, 3]);
+            let ii = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z, 3]);
+            let iii = vertex_index(&mut index_of, &mut vertices, [x, y + e, z + e, 3]);
+            let iv = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z + e, 3]);
+            indices.push(i as _);
+            indices.push(iii as _);
+            indices.push(iv as _);
+            indices.push(iv as _);
+            indices.push(ii as _);
+            indices.push(i as _);
 
             // -X
-            indices.push(i0 as _);
-            indices.push(i4 as _);
-            indices.push(i6 as _);
-            indices.push(i6 as _);
-            indices.push(i2 as _);
-            indices.push(i0 as _);
+            let i = vertex_index(&mut index_of, &mut vertices, [x, y, z, 4]);
+            let ii = vertex_index(&mut index_of, &mut vertices, [x, y + e, z, 4]);
+            let iii = vertex_index(&mut index_of, &mut vertices, [x, y, z + e, 4]);
+            let iv = vertex_index(&mut index_of, &mut vertices, [x, y + e, z + e, 4]);
+            indices.push(i as _);
+            indices.push(iii as _);
+            indices.push(iv as _);
+            indices.push(iv as _);
+            indices.push(ii as _);
+            indices.push(i as _);
 
             // +X
-            indices.push(i1 as _);
-            indices.push(i3 as _);
-            indices.push(i7 as _);
-            indices.push(i7 as _);
-            indices.push(i5 as _);
-            indices.push(i1 as _);
+            let i = vertex_index(&mut index_of, &mut vertices, [x + e, y, z, 5]);
+            let ii = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z, 5]);
+            let iii = vertex_index(&mut index_of, &mut vertices, [x + e, y, z + e, 5]);
+            let iv = vertex_index(&mut index_of, &mut vertices, [x + e, y + e, z + e, 5]);
+            indices.push(i as _);
+            indices.push(ii as _);
+            indices.push(iv as _);
+            indices.push(iv as _);
+            indices.push(iii as _);
+            indices.push(i as _);
         }
 
         (indices, vertices)
@@ -422,17 +440,28 @@ impl Octree {
 }
 
 fn vertex_index(
-    index_of: &mut HashMap<[usize; 3], usize>,
-    vertices: &mut Vec<vec3>,
-    key: [usize; 3],
+    index_of: &mut HashMap<[usize; 4], usize>,
+    vertices: &mut Vec<Vertex>,
+    key: [usize; 4],
 ) -> usize {
     use std::collections::hash_map::Entry;
+    const NORMALS: [vec3; 6] = [
+        Vector([0.0, 0.0, -1.0]),
+        Vector([0.0, 0.0, 1.0]),
+        Vector([0.0, -1.0, 0.0]),
+        Vector([0.0, 1.0, 0.0]),
+        Vector([-1.0, 0.0, 0.0]),
+        Vector([1.0, 0.0, 0.0]),
+    ];
     match index_of.entry(key) {
         Entry::Occupied(o) => *o.get(),
         Entry::Vacant(v) => {
             let i = vertices.len();
             v.insert(i);
-            vertices.push(Vector([key[0] as f32, key[1] as f32, key[2] as f32]));
+            vertices.push(Vertex {
+                pos: Vector([key[0] as f32, key[1] as f32, key[2] as f32]),
+                norm: NORMALS[key[3]],
+            });
             i
         }
     }
