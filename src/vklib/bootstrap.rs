@@ -241,7 +241,7 @@ impl VkContext {
             .instance
             .get_physical_device_properties(self.physical_device.physical_device);
         let create_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
+            .mag_filter(vk::Filter::NEAREST)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::REPEAT)

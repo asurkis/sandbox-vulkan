@@ -17,7 +17,7 @@ pub unsafe fn create_descriptor_pool(vk: &VkContext) -> vkbox::DescriptorPool {
     ];
     let create_info = vk::DescriptorPoolCreateInfo::default()
         .flags(vk::DescriptorPoolCreateFlags::empty())
-        .max_sets(MAX_CONCURRENT_FRAMES as _)
+        .max_sets(2 * MAX_CONCURRENT_FRAMES as u32)
         .pool_sizes(&pool_sizes);
     vkbox::DescriptorPool::new(vk, &create_info)
 }

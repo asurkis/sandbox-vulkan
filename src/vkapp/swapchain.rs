@@ -1,17 +1,21 @@
-use crate::vklib::{VkContext, vkbox, CommittedImage};
+use crate::vklib::{vkbox, CommittedImage, TransientGraphicsCommandBuffer, VkContext};
 use ash::vk;
 use std::{mem, ptr};
 
 pub struct Swapchain<'a> {
-    _color_buffer: CommittedImage<'a>,
+    pub framebuffer_hdr: vkbox::Framebuffer<'a>,
+    pub framebuffers_final: Vec<vkbox::Framebuffer<'a>>,
+    pub hdr_buffer: CommittedImage<'a>,
+    pub msaa_buffer: CommittedImage<'a>,
     _depth_buffer: CommittedImage<'a>,
     _image_views: Vec<vkbox::ImageView<'a>>,
-    pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
 
     command_pool: vk::CommandPool,
-    render_pass: vk::RenderPass,
+    render_pass_main: vk::RenderPass,
+    render_pass_post_effect: vk::RenderPass,
     pub extent: vk::Extent2D,
+    hdr_buffer_format: vk::Format,
     depth_buffer_format: vk::Format,
     samples: vk::SampleCountFlags,
 
@@ -22,7 +26,9 @@ impl<'a> Swapchain<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
         command_pool: vk::CommandPool,
-        render_pass: vk::RenderPass,
+        render_pass_main: vk::RenderPass,
+        render_pass_post_effect: vk::RenderPass,
+        hdr_buffer_format: vk::Format,
         depth_buffer_format: vk::Format,
         samples: vk::SampleCountFlags,
         old_swapchain: Option<&Self>,
@@ -49,19 +55,33 @@ impl<'a> Swapchain<'a> {
             })
             .collect();
         let msaa_on = samples != vk::SampleCountFlags::TYPE_1;
-        let color_buffer = if msaa_on {
+        let msaa_buffer = if msaa_on {
             CommittedImage::new(
                 vk,
-                create_info.image_format,
+                hdr_buffer_format,
                 create_info.image_extent,
                 1,
                 samples,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                 vk::ImageAspectFlags::COLOR,
             )
         } else {
             CommittedImage::default()
         };
+        let hdr_buffer = CommittedImage::new(
+            vk,
+            hdr_buffer_format,
+            create_info.image_extent,
+            1,
+            vk::SampleCountFlags::TYPE_1,
+            vk::ImageUsageFlags::SAMPLED
+                | if msaa_on {
+                    vk::ImageUsageFlags::TRANSFER_DST
+                } else {
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT
+                },
+            vk::ImageAspectFlags::COLOR,
+        );
         let depth_buffer_on = depth_buffer_format != vk::Format::UNDEFINED;
         let depth_buffer = if depth_buffer_on {
             vk.create_depth_buffer(
@@ -73,17 +93,31 @@ impl<'a> Swapchain<'a> {
         } else {
             CommittedImage::default()
         };
-        let framebuffers: Vec<_> = image_views
+        let extent = create_info.image_extent;
+        let framebuffer_hdr = {
+            let attachments = [
+                if msaa_on {
+                    msaa_buffer.view.0
+                } else {
+                    hdr_buffer.view.0
+                },
+                depth_buffer.view.0,
+            ];
+            let create_info = vk::FramebufferCreateInfo::default()
+                .render_pass(render_pass_main)
+                .attachments(&attachments)
+                .width(extent.width)
+                .height(extent.height)
+                .layers(1);
+            vkbox::Framebuffer::new(vk, &create_info)
+        };
+        let framebuffers_final: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = if msaa_on {
-                    vec![color_buffer.view.0, depth_buffer.view.0, iv.0]
-                } else {
-                    vec![iv.0, depth_buffer.view.0]
-                };
+                let attachments = [iv.0];
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
-                    .render_pass(render_pass)
+                    .render_pass(render_pass_post_effect)
                     .attachments(&attachments)
                     .width(extent.width)
                     .height(extent.height)
@@ -91,15 +125,48 @@ impl<'a> Swapchain<'a> {
                 vkbox::Framebuffer::new(vk, &create_info)
             })
             .collect();
+
+        {
+            let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
+            let image_memory_barriers = [vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(hdr_buffer.image.0)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })];
+            vk.device.cmd_pipeline_barrier(
+                command_buffer.buffer,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &image_memory_barriers,
+            );
+        }
+
         Self {
-            framebuffers,
-            _color_buffer: color_buffer,
+            framebuffer_hdr,
+            framebuffers_final,
+            hdr_buffer,
+            msaa_buffer,
             _depth_buffer: depth_buffer,
             _image_views: image_views,
             swapchain,
             command_pool,
-            render_pass,
-            extent: create_info.image_extent,
+            render_pass_main,
+            render_pass_post_effect,
+            extent,
+            hdr_buffer_format,
             depth_buffer_format,
             samples,
             vk,
@@ -174,7 +241,9 @@ impl<'a> Swapchain<'a> {
         let mut new = Self::new(
             self.vk,
             self.command_pool,
-            self.render_pass,
+            self.render_pass_main,
+            self.render_pass_post_effect,
+            self.hdr_buffer_format,
             self.depth_buffer_format,
             self.samples,
             Some(self),

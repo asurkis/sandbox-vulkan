@@ -240,6 +240,7 @@ impl Octree {
         *self = self.shrinked();
     }
 
+    #[allow(unused)]
     pub fn gpu_data(&self) -> Vec<u32> {
         assert!(self.free_nodes.is_empty());
         assert!(self.root == 0);

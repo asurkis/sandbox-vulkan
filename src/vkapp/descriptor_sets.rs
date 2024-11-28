@@ -1,5 +1,5 @@
 use crate::{
-    vklib::{CommittedBuffer, VkContext},
+    vklib::{vkbox, CommittedBuffer, VkContext},
     UniformData, MAX_CONCURRENT_FRAMES,
 };
 use ash::vk;
@@ -7,10 +7,15 @@ use ash::vk;
 pub unsafe fn create_descriptor_sets(
     vk: &VkContext,
     descriptor_pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
+    layouts: &[vkbox::DescriptorSetLayout],
     uniform_buffers: &[CommittedBuffer],
 ) -> Vec<vk::DescriptorSet> {
-    let set_layouts = [layout; MAX_CONCURRENT_FRAMES];
+    let mut set_layouts = Vec::with_capacity(layouts.len() * MAX_CONCURRENT_FRAMES);
+    for layout in layouts {
+        for _ in 0..MAX_CONCURRENT_FRAMES {
+            set_layouts.push(layout.0);
+        }
+    }
     let allocate_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
         .set_layouts(&set_layouts);

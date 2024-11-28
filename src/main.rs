@@ -10,7 +10,8 @@ use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
-    create_descriptor_pool, create_descriptor_sets, create_render_pass, Pipelines, Swapchain,
+    create_descriptor_pool, create_descriptor_sets, create_render_pass_main,
+    create_render_pass_post_effect, Pipelines, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 use voxel::octree::Octree;
@@ -32,7 +33,7 @@ struct Vertex {
 
 fn main() {
     let (indices, vertices) = {
-        const LOG_RADIUS: i32 = 6;
+        const LOG_RADIUS: i32 = 5;
         const RADIUS: i32 = 1 << LOG_RADIUS;
         const DIAMETER: i32 = 2 * RADIUS;
         let mut voxels = vec![0; (DIAMETER * DIAMETER * DIAMETER) as _];
@@ -52,7 +53,7 @@ fn main() {
                 }
             }
         }
-        Octree::from_voxels(&voxels).shrinked().debug_mesh()
+        Octree::from_voxels(&voxels).debug_mesh()
     };
 
     let mut state = StateBox::load("state.json".into());
@@ -62,6 +63,22 @@ fn main() {
         let vk = VkContext::new(&sdl.window);
 
         let msaa_sample_count = vk.select_msaa_samples();
+        // let msaa_sample_count = vk::SampleCountFlags::TYPE_1;
+        let msaa_on = msaa_sample_count != vk::SampleCountFlags::TYPE_1;
+        let hdr_buffer_format = vk.select_image_format(
+            &[
+                vk::Format::R16G16B16_SFLOAT,
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::Format::R32G32B32_SFLOAT,
+                vk::Format::R32G32B32A32_SFLOAT,
+                vk::Format::R64G64B64_SFLOAT,
+                vk::Format::R64G64B64A64_SFLOAT,
+            ],
+            vk::ImageTiling::OPTIMAL,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE
+                | vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
+        );
         let depth_buffer_format = vk.select_image_format(
             &[
                 vk::Format::D32_SFLOAT,
@@ -73,16 +90,29 @@ fn main() {
         );
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
-        let render_pass = create_render_pass(&vk, depth_buffer_format, msaa_sample_count);
+        let render_pass_main = create_render_pass_main(
+            &vk,
+            hdr_buffer_format,
+            depth_buffer_format,
+            msaa_sample_count,
+        );
+        let render_pass_post_effect = create_render_pass_post_effect(&vk);
         let mut swapchain = Swapchain::new(
             &vk,
             command_pool_transient.0,
-            render_pass.0,
+            render_pass_main.0,
+            render_pass_post_effect.0,
+            hdr_buffer_format,
             depth_buffer_format,
             msaa_sample_count,
             None,
         );
-        let pipelines = Pipelines::new(&vk, render_pass.0, msaa_sample_count);
+        let pipelines = Pipelines::new(
+            &vk,
+            render_pass_main.0,
+            render_pass_post_effect.0,
+            msaa_sample_count,
+        );
 
         let mut imgui = imgui::Context::create();
         // imgui.set_ini_filename(None);
@@ -93,14 +123,14 @@ fn main() {
             vk.device.clone(),
             vk.queue_graphics,
             command_pool.0,
-            render_pass.0,
+            render_pass_post_effect.0,
             &mut imgui,
             Some(imgui_rs_vulkan_renderer::Options {
                 in_flight_frames: MAX_CONCURRENT_FRAMES,
                 enable_depth_test: false,
                 enable_depth_write: false,
                 subpass: 0,
-                sample_count: msaa_sample_count,
+                sample_count: vk::SampleCountFlags::TYPE_1,
             }),
         )
         .unwrap();
@@ -155,9 +185,26 @@ fn main() {
         let descriptor_sets = create_descriptor_sets(
             &vk,
             descriptor_pool.0,
-            pipelines.descriptor_set_layout.0,
+            &pipelines.descriptor_set_layouts,
             &uniform_buffers,
         );
+
+        let sampler = vk.create_sampler();
+
+        for i in 0..MAX_CONCURRENT_FRAMES {
+            let image_info = [vk::DescriptorImageInfo {
+                sampler: sampler.0,
+                image_view: swapchain.hdr_buffer.view.0,
+                image_layout: vk::ImageLayout::GENERAL,
+            }];
+            let descriptor_writes = [vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
+                .dst_binding(1)
+                .descriptor_count(1)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_info)];
+            vk.device.update_descriptor_sets(&descriptor_writes, &[]);
+        }
 
         let mut frame_in_flight_index = 0;
 
@@ -180,6 +227,21 @@ fn main() {
                         ..
                     } => {
                         swapchain.reinit();
+
+                        for i in 0..MAX_CONCURRENT_FRAMES {
+                            let image_info = [vk::DescriptorImageInfo {
+                                sampler: sampler.0,
+                                image_view: swapchain.hdr_buffer.view.0,
+                                image_layout: vk::ImageLayout::GENERAL,
+                            }];
+                            let descriptor_writes = [vk::WriteDescriptorSet::default()
+                                .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
+                                .dst_binding(1)
+                                .descriptor_count(1)
+                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                                .image_info(&image_info)];
+                            vk.device.update_descriptor_sets(&descriptor_writes, &[]);
+                        }
                         continue 'main_loop;
                     }
                     _ => {}
@@ -246,7 +308,10 @@ fn main() {
             let cur_fence = fences_in_flight[frame_in_flight_index].0;
             let cur_image_available = semaphores_image_available[frame_in_flight_index].0;
             let cur_render_finished = semaphores_render_finished[frame_in_flight_index].0;
-            let cur_descriptor_set = descriptor_sets[frame_in_flight_index];
+            let cur_descriptor_sets = [
+                descriptor_sets[frame_in_flight_index],
+                descriptor_sets[MAX_CONCURRENT_FRAMES + frame_in_flight_index],
+            ];
 
             ptr::copy(
                 mem::transmute::<*const UniformData, *const std::ffi::c_void>(
@@ -269,6 +334,21 @@ fn main() {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
+
+                    for i in 0..MAX_CONCURRENT_FRAMES {
+                        let image_info = [vk::DescriptorImageInfo {
+                            sampler: sampler.0,
+                            image_view: swapchain.hdr_buffer.view.0,
+                            image_layout: vk::ImageLayout::GENERAL,
+                        }];
+                        let descriptor_writes = [vk::WriteDescriptorSet::default()
+                            .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
+                            .dst_binding(1)
+                            .descriptor_count(1)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&image_info)];
+                        vk.device.update_descriptor_sets(&descriptor_writes, &[]);
+                    }
                     continue 'main_loop;
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
@@ -284,8 +364,8 @@ fn main() {
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
-                        // float32: [1.0, 0.75, 0.5, 0.0],
-                        float32: [0.0; 4],
+                        float32: [1.0, 0.75, 0.5, 0.0],
+                        // float32: [0.0; 4],
                     },
                 },
                 vk::ClearValue {
@@ -294,12 +374,13 @@ fn main() {
                         stencil: 0,
                     },
                 },
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        // float32: [1.0, 0.75, 0.5, 0.0],
+                        float32: [0.0; 4],
+                    },
+                },
             ];
-            let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(render_pass.0)
-                .framebuffer(swapchain.framebuffers[image_index as usize].0)
-                .render_area(swapchain.extent.into())
-                .clear_values(&clear_values);
             let viewports = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -312,6 +393,12 @@ fn main() {
             vk.device
                 .cmd_set_viewport(cur_command_buffer, 0, &viewports);
             vk.device.cmd_set_scissor(cur_command_buffer, 0, &scissors);
+
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass_main.0)
+                .framebuffer(swapchain.framebuffer_hdr.0)
+                .render_area(swapchain.extent.into())
+                .clear_values(&clear_values);
             vk.device.cmd_begin_render_pass(
                 cur_command_buffer,
                 &render_pass_begin,
@@ -320,14 +407,14 @@ fn main() {
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipelines.pipeline.0,
+                pipelines.pipelines[0].0,
             );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipelines.layout.0,
+                pipelines.layouts[0].0,
                 0,
-                slice::from_ref(&cur_descriptor_set),
+                slice::from_ref(&cur_descriptor_sets[0]),
                 &[],
             );
             vk.device.cmd_bind_vertex_buffers(
@@ -344,6 +431,60 @@ fn main() {
             );
             vk.device
                 .cmd_draw_indexed(cur_command_buffer, indices.len() as _, 1, 0, 0, 0);
+            vk.device.cmd_end_render_pass(cur_command_buffer);
+
+            if msaa_on {
+                let regions = [vk::ImageResolve {
+                    src_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    src_offset: vk::Offset3D::default(),
+                    dst_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    dst_offset: vk::Offset3D::default(),
+                    extent: swapchain.extent.into(),
+                }];
+                vk.device.cmd_resolve_image(
+                    cur_command_buffer,
+                    swapchain.msaa_buffer.image.0,
+                    vk::ImageLayout::GENERAL,
+                    swapchain.hdr_buffer.image.0,
+                    vk::ImageLayout::GENERAL,
+                    &regions,
+                );
+            }
+
+            let render_pass_begin = vk::RenderPassBeginInfo::default()
+                .render_pass(render_pass_post_effect.0)
+                .framebuffer(swapchain.framebuffers_final[image_index as usize].0)
+                .render_area(swapchain.extent.into())
+                .clear_values(&clear_values);
+            vk.device.cmd_begin_render_pass(
+                cur_command_buffer,
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
+            );
+            vk.device.cmd_bind_pipeline(
+                cur_command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipelines.pipelines[1].0,
+            );
+            vk.device.cmd_bind_descriptor_sets(
+                cur_command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipelines.layouts[1].0,
+                0,
+                slice::from_ref(&cur_descriptor_sets[1]),
+                &[],
+            );
+            vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
 
             imgui_renderer
                 .cmd_draw(cur_command_buffer, imgui.render())
@@ -372,7 +513,24 @@ fn main() {
                 .queue_present(vk.queue_present, &present_info)
             {
                 Ok(false) => {}
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => swapchain.reinit(),
+                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    swapchain.reinit();
+
+                    for i in 0..MAX_CONCURRENT_FRAMES {
+                        let image_info = [vk::DescriptorImageInfo {
+                            sampler: sampler.0,
+                            image_view: swapchain.hdr_buffer.view.0,
+                            image_layout: vk::ImageLayout::GENERAL,
+                        }];
+                        let descriptor_writes = [vk::WriteDescriptorSet::default()
+                            .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
+                            .dst_binding(1)
+                            .descriptor_count(1)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&image_info)];
+                        vk.device.update_descriptor_sets(&descriptor_writes, &[]);
+                    }
+                }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
 
