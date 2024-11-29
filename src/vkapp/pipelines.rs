@@ -7,8 +7,10 @@ use std::{ffi::CStr, mem, slice};
 
 const BYTECODE_MAIN_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.vert.spv"));
 const BYTECODE_MAIN_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/main.frag.spv"));
-const BYTECODE_POST_EFFECT_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/post_effect.vert.spv"));
-const BYTECODE_POST_EFFECT_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/post_effect.frag.spv"));
+const BYTECODE_POST_EFFECT_VERT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/post_effect.vert.spv"));
+const BYTECODE_POST_EFFECT_FRAG: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/post_effect.frag.spv"));
 
 pub struct Pipelines<'a> {
     pub pipelines: [vkbox::Pipeline<'a>; 2],

@@ -103,11 +103,7 @@ fn main() {
             msaa_sample_count,
             None,
         );
-        let pipelines = Pipelines::new(
-            &vk,
-            render_pass.0,
-            msaa_sample_count,
-        );
+        let pipelines = Pipelines::new(&vk, render_pass.0, msaa_sample_count);
 
         let mut imgui = imgui::Context::create();
         // imgui.set_ini_filename(None);
@@ -427,7 +423,8 @@ fn main() {
             vk.device
                 .cmd_draw_indexed(cur_command_buffer, indices.len() as _, 1, 0, 0, 0);
 
-            vk.device.cmd_next_subpass(cur_command_buffer, vk::SubpassContents::INLINE);
+            vk.device
+                .cmd_next_subpass(cur_command_buffer, vk::SubpassContents::INLINE);
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,

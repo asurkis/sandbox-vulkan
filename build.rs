@@ -1,6 +1,15 @@
 fn main() {
-    let shaders = ["main.vert", "main.frag", "post_effect.vert", "post_effect.frag"];
-    let src_dir = std::env::current_dir().unwrap().join("src").join("vkapp").join("shaders");
+    let shaders = [
+        "main.vert",
+        "main.frag",
+        "post_effect.vert",
+        "post_effect.frag",
+    ];
+    let src_dir = std::env::current_dir()
+        .unwrap()
+        .join("src")
+        .join("vkapp")
+        .join("shaders");
     let out_dir_str = std::env::var("OUT_DIR").unwrap();
     let out_dir = std::path::Path::new(&out_dir_str);
     for shader in shaders {

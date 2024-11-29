@@ -101,6 +101,15 @@ pub unsafe fn create_render_pass(
             dst_access_mask: vk::AccessFlags::SHADER_READ,
             dependency_flags: vk::DependencyFlags::empty(),
         },
+        vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 1,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dependency_flags: vk::DependencyFlags::empty(),
+        },
     ];
     let create_info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
