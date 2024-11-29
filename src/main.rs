@@ -10,8 +10,7 @@ use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
-    create_descriptor_pool, create_descriptor_sets, create_render_pass_main,
-    create_render_pass_post_effect, Pipelines, Swapchain,
+    create_descriptor_pool, create_descriptor_sets, create_render_pass, Pipelines, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 use voxel::octree::Octree;
@@ -64,7 +63,6 @@ fn main() {
 
         let msaa_sample_count = vk.select_msaa_samples();
         // let msaa_sample_count = vk::SampleCountFlags::TYPE_1;
-        let msaa_on = msaa_sample_count != vk::SampleCountFlags::TYPE_1;
         let hdr_buffer_format = vk.select_image_format(
             &[
                 vk::Format::R16G16B16_SFLOAT,
@@ -90,18 +88,16 @@ fn main() {
         );
         let command_pool = vk.create_graphics_command_pool();
         let command_pool_transient = vk.create_graphics_transient_command_pool();
-        let render_pass_main = create_render_pass_main(
+        let render_pass = create_render_pass(
             &vk,
             hdr_buffer_format,
             depth_buffer_format,
             msaa_sample_count,
         );
-        let render_pass_post_effect = create_render_pass_post_effect(&vk);
         let mut swapchain = Swapchain::new(
             &vk,
             command_pool_transient.0,
-            render_pass_main.0,
-            render_pass_post_effect.0,
+            render_pass.0,
             hdr_buffer_format,
             depth_buffer_format,
             msaa_sample_count,
@@ -109,8 +105,7 @@ fn main() {
         );
         let pipelines = Pipelines::new(
             &vk,
-            render_pass_main.0,
-            render_pass_post_effect.0,
+            render_pass.0,
             msaa_sample_count,
         );
 
@@ -123,13 +118,13 @@ fn main() {
             vk.device.clone(),
             vk.queue_graphics,
             command_pool.0,
-            render_pass_post_effect.0,
+            render_pass.0,
             &mut imgui,
             Some(imgui_rs_vulkan_renderer::Options {
                 in_flight_frames: MAX_CONCURRENT_FRAMES,
                 enable_depth_test: false,
                 enable_depth_write: false,
-                subpass: 0,
+                subpass: 1,
                 sample_count: vk::SampleCountFlags::TYPE_1,
             }),
         )
@@ -395,8 +390,8 @@ fn main() {
             vk.device.cmd_set_scissor(cur_command_buffer, 0, &scissors);
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(render_pass_main.0)
-                .framebuffer(swapchain.framebuffer_hdr.0)
+                .render_pass(render_pass.0)
+                .framebuffer(swapchain.framebuffers[image_index as usize].0)
                 .render_area(swapchain.extent.into())
                 .clear_values(&clear_values);
             vk.device.cmd_begin_render_pass(
@@ -431,46 +426,8 @@ fn main() {
             );
             vk.device
                 .cmd_draw_indexed(cur_command_buffer, indices.len() as _, 1, 0, 0, 0);
-            vk.device.cmd_end_render_pass(cur_command_buffer);
 
-            if msaa_on {
-                let regions = [vk::ImageResolve {
-                    src_subresource: vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    src_offset: vk::Offset3D::default(),
-                    dst_subresource: vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    dst_offset: vk::Offset3D::default(),
-                    extent: swapchain.extent.into(),
-                }];
-                vk.device.cmd_resolve_image(
-                    cur_command_buffer,
-                    swapchain.msaa_buffer.image.0,
-                    vk::ImageLayout::GENERAL,
-                    swapchain.hdr_buffer.image.0,
-                    vk::ImageLayout::GENERAL,
-                    &regions,
-                );
-            }
-
-            let render_pass_begin = vk::RenderPassBeginInfo::default()
-                .render_pass(render_pass_post_effect.0)
-                .framebuffer(swapchain.framebuffers_final[image_index as usize].0)
-                .render_area(swapchain.extent.into())
-                .clear_values(&clear_values);
-            vk.device.cmd_begin_render_pass(
-                cur_command_buffer,
-                &render_pass_begin,
-                vk::SubpassContents::INLINE,
-            );
+            vk.device.cmd_next_subpass(cur_command_buffer, vk::SubpassContents::INLINE);
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,

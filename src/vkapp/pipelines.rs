@@ -19,8 +19,7 @@ pub struct Pipelines<'a> {
 impl<'a> Pipelines<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
-        render_pass_scene: vk::RenderPass,
-        render_pass_post_effect: vk::RenderPass,
+        render_pass: vk::RenderPass,
         rasterization_samples: vk::SampleCountFlags,
     ) -> Self {
         let shader_module_main_vert = vk.create_shader_module(BYTECODE_MAIN_VERT);
@@ -182,7 +181,7 @@ impl<'a> Pipelines<'a> {
                 .color_blend_state(&color_blend_state[0])
                 .dynamic_state(&dynamic_state_create_info)
                 .layout(layouts[0].0)
-                .render_pass(render_pass_scene)
+                .render_pass(render_pass)
                 .subpass(0),
             vk::GraphicsPipelineCreateInfo::default()
                 .stages(&stage_create_infos[1])
@@ -195,8 +194,8 @@ impl<'a> Pipelines<'a> {
                 .color_blend_state(&color_blend_state[1])
                 .dynamic_state(&dynamic_state_create_info)
                 .layout(layouts[1].0)
-                .render_pass(render_pass_post_effect)
-                .subpass(0),
+                .render_pass(render_pass)
+                .subpass(1),
         ];
         let pipelines = vk
             .device

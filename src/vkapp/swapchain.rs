@@ -3,17 +3,15 @@ use ash::vk;
 use std::{mem, ptr};
 
 pub struct Swapchain<'a> {
-    pub framebuffer_hdr: vkbox::Framebuffer<'a>,
-    pub framebuffers_final: Vec<vkbox::Framebuffer<'a>>,
+    pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
     pub hdr_buffer: CommittedImage<'a>,
-    pub msaa_buffer: CommittedImage<'a>,
+    _msaa_buffer: CommittedImage<'a>,
     _depth_buffer: CommittedImage<'a>,
     _image_views: Vec<vkbox::ImageView<'a>>,
     pub swapchain: vkbox::SwapchainKHR<'a>,
 
     command_pool: vk::CommandPool,
-    render_pass_main: vk::RenderPass,
-    render_pass_post_effect: vk::RenderPass,
+    render_pass: vk::RenderPass,
     pub extent: vk::Extent2D,
     hdr_buffer_format: vk::Format,
     depth_buffer_format: vk::Format,
@@ -26,8 +24,7 @@ impl<'a> Swapchain<'a> {
     pub unsafe fn new(
         vk: &'a VkContext,
         command_pool: vk::CommandPool,
-        render_pass_main: vk::RenderPass,
-        render_pass_post_effect: vk::RenderPass,
+        render_pass: vk::RenderPass,
         hdr_buffer_format: vk::Format,
         depth_buffer_format: vk::Format,
         samples: vk::SampleCountFlags,
@@ -94,30 +91,18 @@ impl<'a> Swapchain<'a> {
             CommittedImage::default()
         };
         let extent = create_info.image_extent;
-        let framebuffer_hdr = {
-            let attachments = [
-                if msaa_on {
-                    msaa_buffer.view.0
-                } else {
-                    hdr_buffer.view.0
-                },
-                depth_buffer.view.0,
-            ];
-            let create_info = vk::FramebufferCreateInfo::default()
-                .render_pass(render_pass_main)
-                .attachments(&attachments)
-                .width(extent.width)
-                .height(extent.height)
-                .layers(1);
-            vkbox::Framebuffer::new(vk, &create_info)
-        };
-        let framebuffers_final: Vec<_> = image_views
+        let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = [iv.0];
+                let attachments = [
+                    msaa_buffer.view.0,
+                    depth_buffer.view.0,
+                    hdr_buffer.view.0,
+                    iv.0,
+                ];
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
-                    .render_pass(render_pass_post_effect)
+                    .render_pass(render_pass)
                     .attachments(&attachments)
                     .width(extent.width)
                     .height(extent.height)
@@ -155,16 +140,14 @@ impl<'a> Swapchain<'a> {
         }
 
         Self {
-            framebuffer_hdr,
-            framebuffers_final,
+            framebuffers,
             hdr_buffer,
-            msaa_buffer,
+            _msaa_buffer: msaa_buffer,
             _depth_buffer: depth_buffer,
             _image_views: image_views,
             swapchain,
             command_pool,
-            render_pass_main,
-            render_pass_post_effect,
+            render_pass,
             extent,
             hdr_buffer_format,
             depth_buffer_format,
@@ -241,8 +224,7 @@ impl<'a> Swapchain<'a> {
         let mut new = Self::new(
             self.vk,
             self.command_pool,
-            self.render_pass_main,
-            self.render_pass_post_effect,
+            self.render_pass,
             self.hdr_buffer_format,
             self.depth_buffer_format,
             self.samples,
