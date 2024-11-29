@@ -86,7 +86,7 @@ impl<'a> Pipelines<'a> {
             .scissors(&scissors);
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::BACK)
+            // .cull_mode(vk::CullModeFlags::BACK)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0);
         let multisample_state = [
@@ -99,7 +99,7 @@ impl<'a> Pipelines<'a> {
             [vk::PipelineColorBlendAttachmentState {
                 blend_enable: vk::TRUE,
                 src_color_blend_factor: vk::BlendFactor::ONE,
-                dst_color_blend_factor: vk::BlendFactor::ZERO,
+                dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
                 color_blend_op: vk::BlendOp::ADD,
                 src_alpha_blend_factor: vk::BlendFactor::ONE,
                 dst_alpha_blend_factor: vk::BlendFactor::ZERO,
@@ -124,9 +124,9 @@ impl<'a> Pipelines<'a> {
         ];
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
             .flags(vk::PipelineDepthStencilStateCreateFlags::empty())
-            .depth_test_enable(true)
-            .depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS)
+            // .depth_test_enable(true)
+            // .depth_write_enable(true)
+            // .depth_compare_op(vk::CompareOp::LESS)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
         let color_blend_state = [

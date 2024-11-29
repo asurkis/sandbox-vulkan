@@ -364,8 +364,8 @@ fn main() {
             let clear_values = [
                 vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [1.0, 0.75, 0.5, 0.0],
-                        // float32: [0.0; 4],
+                        // float32: [1.0, 0.75, 0.5, 0.0],
+                        float32: [0.0; 4],
                     },
                 },
                 vk::ClearValue {
