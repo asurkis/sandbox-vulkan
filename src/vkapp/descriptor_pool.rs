@@ -12,12 +12,12 @@ pub unsafe fn create_descriptor_pool(vk: &VkContext) -> vkbox::DescriptorPool {
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: MAX_CONCURRENT_FRAMES as _,
+            descriptor_count: 1,
         },
     ];
     let create_info = vk::DescriptorPoolCreateInfo::default()
         .flags(vk::DescriptorPoolCreateFlags::empty())
-        .max_sets(2 * MAX_CONCURRENT_FRAMES as u32)
+        .max_sets(MAX_CONCURRENT_FRAMES as u32 + 1)
         .pool_sizes(&pool_sizes);
     vkbox::DescriptorPool::new(vk, &create_info)
 }

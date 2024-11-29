@@ -1,4 +1,5 @@
 mod math;
+mod subpass;
 mod state;
 mod vkapp;
 mod vklib;
@@ -10,8 +11,8 @@ use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
-    create_descriptor_pool, create_descriptor_sets, create_render_pass, update_descriptor_sets,
-    Pipelines, Swapchain,
+    create_descriptor_pool, create_descriptor_set_post_effect, create_descriptor_sets_main,
+    create_render_pass, update_descriptor_set_post_effect, Pipelines, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 use voxel::octree::Octree;
@@ -104,7 +105,8 @@ fn main() {
             msaa_sample_count,
             None,
         );
-        let pipelines = Pipelines::new(&vk, render_pass.0, msaa_sample_count);
+        let pipeline_main = Pipelines::new_main(&vk, render_pass.0, msaa_sample_count);
+        let pipeline_post_effect = Pipelines::new_post_effect(&vk, render_pass.0);
 
         let mut imgui = imgui::Context::create();
         // imgui.set_ini_filename(None);
@@ -174,17 +176,22 @@ fn main() {
         }
 
         let descriptor_pool = create_descriptor_pool(&vk);
-        let descriptor_sets = create_descriptor_sets(
+        let descriptor_sets_main = create_descriptor_sets_main(
             &vk,
             descriptor_pool.0,
-            &pipelines.descriptor_set_layouts,
+            pipeline_main.descriptor_set_layout.0,
             &uniform_buffers,
+        );
+        let descriptor_set_post_effect = create_descriptor_set_post_effect(
+            &vk,
+            descriptor_pool.0,
+            pipeline_post_effect.descriptor_set_layout.0,
         );
 
         let sampler = vk.create_sampler();
-        update_descriptor_sets(
+        update_descriptor_set_post_effect(
             &vk,
-            &descriptor_sets,
+            descriptor_set_post_effect,
             sampler.0,
             swapchain.hdr_buffer.view.0,
         );
@@ -210,9 +217,9 @@ fn main() {
                         ..
                     } => {
                         swapchain.reinit();
-                        update_descriptor_sets(
+                        update_descriptor_set_post_effect(
                             &vk,
-                            &descriptor_sets,
+                            descriptor_set_post_effect,
                             sampler.0,
                             swapchain.hdr_buffer.view.0,
                         );
@@ -282,10 +289,7 @@ fn main() {
             let cur_fence = fences_in_flight[frame_in_flight_index].0;
             let cur_image_available = semaphores_image_available[frame_in_flight_index].0;
             let cur_render_finished = semaphores_render_finished[frame_in_flight_index].0;
-            let cur_descriptor_sets = [
-                descriptor_sets[frame_in_flight_index],
-                descriptor_sets[MAX_CONCURRENT_FRAMES + frame_in_flight_index],
-            ];
+            let cur_descriptor_set_main = descriptor_sets_main[frame_in_flight_index];
 
             ptr::copy(
                 mem::transmute::<*const UniformData, *const std::ffi::c_void>(
@@ -308,9 +312,9 @@ fn main() {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
-                    update_descriptor_sets(
+                    update_descriptor_set_post_effect(
                         &vk,
-                        &descriptor_sets,
+                        descriptor_set_post_effect,
                         sampler.0,
                         swapchain.hdr_buffer.view.0,
                     );
@@ -373,14 +377,14 @@ fn main() {
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipelines.pipelines[0].0,
+                pipeline_main.pipeline.0,
             );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipelines.layouts[0].0,
+                pipeline_main.layout.0,
                 0,
-                slice::from_ref(&cur_descriptor_sets[0]),
+                slice::from_ref(&cur_descriptor_set_main),
                 &[],
             );
             vk.device.cmd_bind_vertex_buffers(
@@ -403,14 +407,14 @@ fn main() {
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipelines.pipelines[1].0,
+                pipeline_post_effect.pipeline.0,
             );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipelines.layouts[1].0,
+                pipeline_post_effect.layout.0,
                 0,
-                slice::from_ref(&cur_descriptor_sets[1]),
+                slice::from_ref(&descriptor_set_post_effect),
                 &[],
             );
             vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
@@ -444,9 +448,9 @@ fn main() {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
-                    update_descriptor_sets(
+                    update_descriptor_set_post_effect(
                         &vk,
-                        &descriptor_sets,
+                        descriptor_set_post_effect,
                         sampler.0,
                         swapchain.hdr_buffer.view.0,
                     );
