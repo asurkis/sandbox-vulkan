@@ -36,3 +36,25 @@ pub unsafe fn create_descriptor_sets(
     }
     sets
 }
+
+pub unsafe fn update_descriptor_sets(
+    vk: &VkContext,
+    descriptor_sets: &[vk::DescriptorSet],
+    sampler: vk::Sampler,
+    image_view: vk::ImageView,
+) {
+    for i in 0..MAX_CONCURRENT_FRAMES {
+        let image_info = [vk::DescriptorImageInfo {
+            sampler,
+            image_view,
+            image_layout: vk::ImageLayout::GENERAL,
+        }];
+        let descriptor_writes = [vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
+            .dst_binding(1)
+            .descriptor_count(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&image_info)];
+        vk.device.update_descriptor_sets(&descriptor_writes, &[]);
+    }
+}

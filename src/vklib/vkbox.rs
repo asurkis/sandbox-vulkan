@@ -101,6 +101,13 @@ declare_box!(
     destroy_pipeline_layout
 );
 declare_box!(
+    QueryPool,
+    device,
+    QueryPoolCreateInfo,
+    create_query_pool,
+    destroy_query_pool
+);
+declare_box!(
     RenderPass,
     device,
     RenderPassCreateInfo,

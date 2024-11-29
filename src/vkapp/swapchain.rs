@@ -94,12 +94,10 @@ impl<'a> Swapchain<'a> {
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let attachments = [
-                    msaa_buffer.view.0,
-                    depth_buffer.view.0,
-                    hdr_buffer.view.0,
-                    iv.0,
-                ];
+                let mut attachments = vec![iv.0, depth_buffer.view.0, hdr_buffer.view.0];
+                if msaa_on {
+                    attachments.push(msaa_buffer.view.0);
+                }
                 let extent = create_info.image_extent;
                 let create_info = vk::FramebufferCreateInfo::default()
                     .render_pass(render_pass)

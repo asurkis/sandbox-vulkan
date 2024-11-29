@@ -10,7 +10,8 @@ use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
-    create_descriptor_pool, create_descriptor_sets, create_render_pass, Pipelines, Swapchain,
+    create_descriptor_pool, create_descriptor_sets, create_render_pass, update_descriptor_sets,
+    Pipelines, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 use voxel::octree::Octree;
@@ -181,21 +182,12 @@ fn main() {
         );
 
         let sampler = vk.create_sampler();
-
-        for i in 0..MAX_CONCURRENT_FRAMES {
-            let image_info = [vk::DescriptorImageInfo {
-                sampler: sampler.0,
-                image_view: swapchain.hdr_buffer.view.0,
-                image_layout: vk::ImageLayout::GENERAL,
-            }];
-            let descriptor_writes = [vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
-                .dst_binding(1)
-                .descriptor_count(1)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&image_info)];
-            vk.device.update_descriptor_sets(&descriptor_writes, &[]);
-        }
+        update_descriptor_sets(
+            &vk,
+            &descriptor_sets,
+            sampler.0,
+            swapchain.hdr_buffer.view.0,
+        );
 
         let mut frame_in_flight_index = 0;
 
@@ -218,21 +210,12 @@ fn main() {
                         ..
                     } => {
                         swapchain.reinit();
-
-                        for i in 0..MAX_CONCURRENT_FRAMES {
-                            let image_info = [vk::DescriptorImageInfo {
-                                sampler: sampler.0,
-                                image_view: swapchain.hdr_buffer.view.0,
-                                image_layout: vk::ImageLayout::GENERAL,
-                            }];
-                            let descriptor_writes = [vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
-                                .dst_binding(1)
-                                .descriptor_count(1)
-                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                                .image_info(&image_info)];
-                            vk.device.update_descriptor_sets(&descriptor_writes, &[]);
-                        }
+                        update_descriptor_sets(
+                            &vk,
+                            &descriptor_sets,
+                            sampler.0,
+                            swapchain.hdr_buffer.view.0,
+                        );
                         continue 'main_loop;
                     }
                     _ => {}
@@ -325,21 +308,12 @@ fn main() {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
-
-                    for i in 0..MAX_CONCURRENT_FRAMES {
-                        let image_info = [vk::DescriptorImageInfo {
-                            sampler: sampler.0,
-                            image_view: swapchain.hdr_buffer.view.0,
-                            image_layout: vk::ImageLayout::GENERAL,
-                        }];
-                        let descriptor_writes = [vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
-                            .dst_binding(1)
-                            .descriptor_count(1)
-                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                            .image_info(&image_info)];
-                        vk.device.update_descriptor_sets(&descriptor_writes, &[]);
-                    }
+                    update_descriptor_sets(
+                        &vk,
+                        &descriptor_sets,
+                        sampler.0,
+                        swapchain.hdr_buffer.view.0,
+                    );
                     continue 'main_loop;
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
@@ -353,16 +327,17 @@ fn main() {
                 .begin_command_buffer(cur_command_buffer, &begin_info)
                 .unwrap();
             let clear_values = [
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        // float32: [1.0, 0.75, 0.5, 0.0],
-                        float32: [0.0; 4],
-                    },
-                },
+                vk::ClearValue::default(),
                 vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 1.0,
                         stencil: 0,
+                    },
+                },
+                vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        // float32: [1.0, 0.75, 0.5, 0.0],
+                        float32: [0.0; 4],
                     },
                 },
                 vk::ClearValue {
@@ -469,21 +444,12 @@ fn main() {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
-
-                    for i in 0..MAX_CONCURRENT_FRAMES {
-                        let image_info = [vk::DescriptorImageInfo {
-                            sampler: sampler.0,
-                            image_view: swapchain.hdr_buffer.view.0,
-                            image_layout: vk::ImageLayout::GENERAL,
-                        }];
-                        let descriptor_writes = [vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_sets[MAX_CONCURRENT_FRAMES + i])
-                            .dst_binding(1)
-                            .descriptor_count(1)
-                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                            .image_info(&image_info)];
-                        vk.device.update_descriptor_sets(&descriptor_writes, &[]);
-                    }
+                    update_descriptor_sets(
+                        &vk,
+                        &descriptor_sets,
+                        sampler.0,
+                        swapchain.hdr_buffer.view.0,
+                    );
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),
             };
