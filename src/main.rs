@@ -17,7 +17,7 @@ use vkapp::{
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
-const PARTICLE_COUNT: usize = 1024;
+const MAX_PARTICLE_COUNT: usize = 1 << 16;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct CameraData {
@@ -127,7 +127,7 @@ fn main() {
         let particles_buffer = CommittedBuffer::upload(
             &vk,
             command_pool_transient.0,
-            &vec![Particle::default(); PARTICLE_COUNT],
+            &vec![Particle::default(); MAX_PARTICLE_COUNT],
             vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::VERTEX_BUFFER,
         );
 
@@ -281,6 +281,12 @@ fn main() {
                 ui.slider("Turn speed", -360.0, 360.0, &mut state.turn_speed);
                 ui.slider("Angle", -180.0, 180.0, &mut state.angle_deg);
                 ui.spacing();
+                ui.slider(
+                    "Particle count",
+                    0,
+                    MAX_PARTICLE_COUNT as u32,
+                    &mut state.particle_count,
+                );
                 ui.slider("Particle lifetime", 0.0, 10.0, &mut state.init_ttl);
                 ui.input_float4("Particle initial position", &mut state.init_pos.0)
                     .build();
@@ -332,7 +338,7 @@ fn main() {
             camera_data.mat_proj.0[2][3] = 1.0;
             camera_data.mat_view_proj = camera_data.mat_proj.dot(&camera_data.mat_view);
 
-            simulation_params.particle_count = PARTICLE_COUNT as u32;
+            simulation_params.particle_count = state.particle_count;
             simulation_params.rng_seed = (time_curr - time_start).subsec_nanos();
             simulation_params.time_step = 1e-9 * nanos as f32;
             simulation_params.init_ttl = state.init_ttl;
@@ -441,12 +447,8 @@ fn main() {
                 &[cur_descriptor_set_simulation],
                 &[],
             );
-            vk.device.cmd_dispatch(
-                cur_command_buffer,
-                ((PARTICLE_COUNT + 255) / 256) as _,
-                1,
-                1,
-            );
+            vk.device
+                .cmd_dispatch(cur_command_buffer, (state.particle_count + 255) / 256, 1, 1);
 
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.0)
@@ -486,7 +488,7 @@ fn main() {
             vk.device.cmd_draw_indexed(
                 cur_command_buffer,
                 n_indices,
-                PARTICLE_COUNT as u32,
+                state.particle_count,
                 0,
                 0,
                 0,

@@ -7,7 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::math::{vec2, vec3, vec4, Vector};
+use crate::{
+    math::{vec2, vec3, vec4, Vector},
+    MAX_PARTICLE_COUNT,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -16,6 +19,7 @@ pub struct State {
     pub angle_deg: f32,
     pub turn_speed: f32,
 
+    pub particle_count: u32,
     pub init_ttl: f32,
     pub init_pos: vec4,
     pub init_vel: vec4,
@@ -36,6 +40,7 @@ impl Default for State {
             angle_deg: 0.0,
             turn_speed: 0.0,
 
+            particle_count: MAX_PARTICLE_COUNT as _,
             init_ttl: 0.0,
             init_pos: Vector([0.0; 4]),
             init_vel: Vector([0.0; 4]),
