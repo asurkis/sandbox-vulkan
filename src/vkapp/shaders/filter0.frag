@@ -12,7 +12,7 @@ layout(location = 0) out vec4 out_color;
 layout(location = 1) out vec4 out_bloom;
 
 void main() {
-    vec4 sampled = texture(img, in_tex_coord);
-    out_color = min(sampled, 1);
-    out_bloom = max(sampled - 1, 0);
+    vec3 sampled = texture(img, in_tex_coord).xyz;
+    out_color = vec4(min(sampled, 1), 1);
+    out_bloom = vec4(max(sampled - 1, 0), 1);
 }

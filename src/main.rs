@@ -272,7 +272,7 @@ fn main() {
             let time_curr = time::Instant::now();
 
             let ui = imgui.new_frame();
-            ui.window("Info").build(|| {
+            ui.window("Settings").build(|| {
                 ui.text(format!("FPS: {}", ui.io().framerate));
                 ui.input_float3("Orbit center", &mut state.orbit_center.0)
                     .build();

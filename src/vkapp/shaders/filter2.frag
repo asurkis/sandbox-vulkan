@@ -11,13 +11,13 @@ layout(location = 0) in vec2 in_tex_coord;
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    vec4 sampled = vec4(0);
+    vec3 sampled = vec3(0);
     float ksum = 0;
     for (float y = -params.kernel_radius.y; y <= params.kernel_radius.y; ++y) {
         float k = exp2(-0.5 / (params.kernel_radius.y + 0.01) * y * y);
-        sampled += k * texture(img, in_tex_coord + vec2(0, y) * params.screen_data.zw);
+        sampled += k * texture(img, in_tex_coord + vec2(0, y) * params.screen_data.zw).xyz;
         ksum += k;
     }
     sampled /= ksum;
-    out_color = sampled;
+    out_color = vec4(sampled, 1);
 }
