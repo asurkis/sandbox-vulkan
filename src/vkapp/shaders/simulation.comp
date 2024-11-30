@@ -1,0 +1,75 @@
+#version 450
+
+uint invert_bits(uint x) {
+    x = ((x & 0xFFFF) << 16) | ((x >> 16) & 0xFFFF);
+    x = ((x & 0xFF00FF) << 8) | ((x >> 8) & 0xFF00FF);
+    x = ((x & 0xF0F0F0F) << 4) | ((x >> 4) & 0xF0F0F0F);
+    x = ((x & 0x33333333) << 2) | ((x >> 2) & 0x33333333);
+    x = ((x & 0x55555555) << 1) | ((x >> 1) & 0x55555555);
+    return x;
+}
+
+float sample_rng(inout uint seed) {
+    seed = (3 * seed + 541236987) % 1000000007;
+    return float(seed) / 1000000007.0;
+}
+
+vec3 sample_rng_sphere(inout uint seed, float radius) {
+    vec3 v = vec3(0);
+    v.x = sample_rng(seed);
+    v.y = sample_rng(seed);
+    v.z = sample_rng(seed);
+    v = 2.0 * v - 1.0;
+    float len = length(v);
+    if (len > 1.0)
+        v /= len;
+    return radius * v;
+}
+
+layout(std140, binding = 0) uniform SimulationStepParams {
+    vec4 init_pos; // w --- acceptable deviation
+    vec4 init_vel; // w --- acceptable deviation
+    vec4 acc; // w --- unused
+    uint particle_count;
+    uint rng_seed;
+    float time_step;
+    float init_ttl;
+} ssp;
+
+struct Particle {
+    vec4 pos; // w --- time to live
+    vec4 vel;
+};
+
+layout(std140, binding = 1) buffer ParticlesSSBO {
+    Particle particles[];
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint i_particle = gl_GlobalInvocationID.x;
+    if (i_particle >= ssp.particle_count) {
+        return;
+    }
+    vec3 pos = particles[i_particle].pos.xyz;
+    float ttl = particles[i_particle].pos.w;
+    vec3 vel = particles[i_particle].vel.xyz;
+    vec3 acc = ssp.acc.xyz;
+
+    pos += ssp.time_step * (vel + 0.5 * ssp.time_step * acc);
+    vel += ssp.time_step * acc;
+    ttl -= ssp.time_step;
+    if (ttl <= 0.0) {
+        pos = ssp.init_pos.xyz;
+        ttl = ssp.init_ttl;
+        vel = ssp.init_vel.xyz;
+
+        uint seed = (ssp.rng_seed + invert_bits(i_particle)) % 1000000007;
+        ttl *= 0.5 + sample_rng(seed);
+        pos += sample_rng_sphere(seed, ssp.init_pos.w);
+        vel += sample_rng_sphere(seed, ssp.init_vel.w);
+    }
+    particles[i_particle].pos = vec4(pos, ttl);
+    particles[i_particle].vel = vec4(vel, 0);
+}

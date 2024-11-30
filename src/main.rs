@@ -1,29 +1,40 @@
 mod math;
-mod subpass;
 mod state;
 mod vkapp;
 mod vklib;
 mod voxel;
 
-use ash::vk::{self, BufferUsageFlags};
-use math::{mat4, vec3, Vector};
+use ash::vk;
+use math::{mat4, vec3, vec4, Vector};
 use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
     create_descriptor_pool, create_descriptor_set_post_effect, create_descriptor_sets_main,
-    create_render_pass, update_descriptor_set_post_effect, Pipelines, Swapchain,
+    create_descriptor_sets_simulation, create_render_pass, update_descriptor_set_post_effect,
+    PipelineBox, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
-use voxel::octree::Octree;
 
 const MAX_CONCURRENT_FRAMES: usize = 2;
+const PARTICLE_COUNT: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Default)]
-struct UniformData {
+struct CameraData {
     mat_view: mat4,
     mat_proj: mat4,
     mat_view_proj: mat4,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SimulationStepParams {
+    init_pos: vec4, // w --- acceptable deviation
+    init_vel: vec4, // w --- acceptable deviation
+    acc: vec4,      // w --- unused
+    particle_count: u32,
+    rng_seed: u32,
+    time_step: f32,
+    init_ttl: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -32,31 +43,13 @@ struct Vertex {
     norm: vec3,
 }
 
-fn main() {
-    let (indices, vertices) = {
-        const LOG_RADIUS: i32 = 5;
-        const RADIUS: i32 = 1 << LOG_RADIUS;
-        const DIAMETER: i32 = 2 * RADIUS;
-        let mut voxels = vec![0; (DIAMETER * DIAMETER * DIAMETER) as _];
-        for z in 0..DIAMETER {
-            for y in 0..DIAMETER {
-                for x in 0..DIAMETER {
-                    let i_vox = ((z * DIAMETER + y) * DIAMETER + x) as usize;
-                    let dx = 2 * x + 1 - 2 * RADIUS;
-                    let dy = 2 * y + 1 - 2 * RADIUS;
-                    let dz = 2 * z + 1 - 2 * RADIUS;
-                    let r2 = dx * dx + dy * dy + dz * dz;
-                    if r2 < 4 * RADIUS * RADIUS {
-                        voxels[i_vox] = 0;
-                    } else {
-                        voxels[i_vox] = !0;
-                    }
-                }
-            }
-        }
-        Octree::from_voxels(&voxels).debug_mesh()
-    };
+#[derive(Clone, Copy, Debug, Default)]
+struct Particle {
+    pos: vec4,
+    vel: vec4,
+}
 
+fn main() {
     let mut state = StateBox::load("state.json".into());
 
     unsafe {
@@ -105,8 +98,10 @@ fn main() {
             msaa_sample_count,
             None,
         );
-        let pipeline_main = Pipelines::new_main(&vk, render_pass.0, msaa_sample_count);
-        let pipeline_post_effect = Pipelines::new_post_effect(&vk, render_pass.0);
+        let pipeline_simulate = PipelineBox::new_simulation(&vk);
+        // let pipeline_main = PipelineBox::new_main(&vk, render_pass.0, msaa_sample_count);
+        let pipeline_particle = PipelineBox::new_particle(&vk, render_pass.0, msaa_sample_count);
+        let pipeline_post_effect = PipelineBox::new_post_effect(&vk, render_pass.0);
 
         let mut imgui = imgui::Context::create();
         // imgui.set_ini_filename(None);
@@ -129,58 +124,102 @@ fn main() {
         )
         .unwrap();
 
-        let vertex_buffer = CommittedBuffer::upload(
+        let particles_buffer = CommittedBuffer::upload(
             &vk,
             command_pool_transient.0,
-            &vertices,
-            BufferUsageFlags::VERTEX_BUFFER,
-        );
-        let index_buffer = CommittedBuffer::upload(
-            &vk,
-            command_pool_transient.0,
-            &indices,
-            BufferUsageFlags::INDEX_BUFFER,
+            &vec![Particle::default(); PARTICLE_COUNT],
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::VERTEX_BUFFER,
         );
 
-        let mut uniform_data = UniformData::default();
-        let uniform_data_size = mem::size_of_val(&uniform_data);
+        let (index_buffer, n_indices) = {
+            let indices = [0u32, 1, 3, 3, 2, 0];
+            (
+                CommittedBuffer::upload(
+                    &vk,
+                    command_pool_transient.0,
+                    &indices,
+                    vk::BufferUsageFlags::INDEX_BUFFER,
+                ),
+                indices.len() as u32,
+            )
+        };
+
+        let mut camera_data = CameraData::default();
+        let camera_data_size = mem::size_of_val(&camera_data);
+
+        let mut simulation_params = SimulationStepParams::default();
+        let simulation_params_size = mem::size_of_val(&simulation_params);
 
         let command_buffers =
             vk.allocate_command_buffers(command_pool.0, MAX_CONCURRENT_FRAMES as _);
-        let mut uniform_buffers = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
-        let mut uniform_mappings = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut camera_buffers = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut camera_mappings = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut simulation_params_buffers = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
+        let mut simulation_params_mappings = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         let mut semaphores_image_available = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         let mut semaphores_render_finished = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         let mut fences_in_flight = Vec::with_capacity(MAX_CONCURRENT_FRAMES);
         for _ in 0..MAX_CONCURRENT_FRAMES {
-            let uniform_buffer = CommittedBuffer::new(
+            let buffer = CommittedBuffer::new(
                 &vk,
-                uniform_data_size as _,
+                camera_data_size as _,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             );
             let memory_mapping = vk
                 .device
                 .map_memory(
-                    uniform_buffer.memory.0,
+                    buffer.memory.0,
                     0,
-                    uniform_data_size as _,
+                    camera_data_size as _,
                     vk::MemoryMapFlags::empty(),
                 )
                 .unwrap();
-            uniform_mappings.push(memory_mapping);
-            uniform_buffers.push(uniform_buffer);
+            camera_mappings.push(memory_mapping);
+            camera_buffers.push(buffer);
+
+            let buffer = CommittedBuffer::new(
+                &vk,
+                simulation_params_size as _,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            );
+            let memory_mapping = vk
+                .device
+                .map_memory(
+                    buffer.memory.0,
+                    0,
+                    simulation_params_size as _,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .unwrap();
+            simulation_params_mappings.push(memory_mapping);
+            simulation_params_buffers.push(buffer);
+
             semaphores_image_available.push(vk.create_semaphore());
             semaphores_render_finished.push(vk.create_semaphore());
             fences_in_flight.push(vk.create_fence_signaled());
         }
 
         let descriptor_pool = create_descriptor_pool(&vk);
-        let descriptor_sets_main = create_descriptor_sets_main(
+        let descriptor_sets_simulation = create_descriptor_sets_simulation(
             &vk,
             descriptor_pool.0,
-            pipeline_main.descriptor_set_layout.0,
-            &uniform_buffers,
+            pipeline_simulate.descriptor_set_layout.0,
+            &simulation_params_buffers,
+            particles_buffer.buffer.0,
+        );
+        // let descriptor_sets_main = create_descriptor_sets_main(
+        //     &vk,
+        //     descriptor_pool.0,
+        //     pipeline_main.descriptor_set_layout.0,
+        //     &uniform_buffers,
+        // );
+        let descriptor_sets_particle = create_descriptor_sets_main(
+            &vk,
+            descriptor_pool.0,
+            pipeline_particle.descriptor_set_layout.0,
+            &camera_buffers,
         );
         let descriptor_set_post_effect = create_descriptor_set_post_effect(
             &vk,
@@ -198,7 +237,8 @@ fn main() {
 
         let mut frame_in_flight_index = 0;
 
-        let mut time_prev = time::Instant::now();
+        let time_start = time::Instant::now();
+        let mut time_prev = time_start;
 
         'main_loop: loop {
             imgui_sdl.prepare_frame(&mut imgui, &sdl.window, &sdl.event_pump);
@@ -261,42 +301,58 @@ fn main() {
             let cam_right = cam_forward.cross(world_up).normalize();
             let cam_down = cam_forward.cross(cam_right);
 
-            uniform_data.mat_view.0[0][0] = cam_right.x();
-            uniform_data.mat_view.0[1][0] = cam_right.y();
-            uniform_data.mat_view.0[2][0] = cam_right.z();
-            uniform_data.mat_view.0[3][0] = -cam_right.dot(cam_pos);
-            uniform_data.mat_view.0[0][1] = cam_down.x();
-            uniform_data.mat_view.0[1][1] = cam_down.y();
-            uniform_data.mat_view.0[2][1] = cam_down.z();
-            uniform_data.mat_view.0[3][1] = -cam_down.dot(cam_pos);
-            uniform_data.mat_view.0[0][2] = cam_forward.x();
-            uniform_data.mat_view.0[1][2] = cam_forward.y();
-            uniform_data.mat_view.0[2][2] = cam_forward.z();
-            uniform_data.mat_view.0[3][2] = -cam_forward.dot(cam_pos);
-            uniform_data.mat_view.0[0][3] = 0.0;
-            uniform_data.mat_view.0[1][3] = 0.0;
-            uniform_data.mat_view.0[2][3] = 0.0;
-            uniform_data.mat_view.0[3][3] = 1.0;
+            camera_data.mat_view.0[0][0] = cam_right.x();
+            camera_data.mat_view.0[1][0] = cam_right.y();
+            camera_data.mat_view.0[2][0] = cam_right.z();
+            camera_data.mat_view.0[3][0] = -cam_right.dot(cam_pos);
+            camera_data.mat_view.0[0][1] = cam_down.x();
+            camera_data.mat_view.0[1][1] = cam_down.y();
+            camera_data.mat_view.0[2][1] = cam_down.z();
+            camera_data.mat_view.0[3][1] = -cam_down.dot(cam_pos);
+            camera_data.mat_view.0[0][2] = cam_forward.x();
+            camera_data.mat_view.0[1][2] = cam_forward.y();
+            camera_data.mat_view.0[2][2] = cam_forward.z();
+            camera_data.mat_view.0[3][2] = -cam_forward.dot(cam_pos);
+            camera_data.mat_view.0[0][3] = 0.0;
+            camera_data.mat_view.0[1][3] = 0.0;
+            camera_data.mat_view.0[2][3] = 0.0;
+            camera_data.mat_view.0[3][3] = 1.0;
 
-            uniform_data.mat_proj = mat4::identity();
-            uniform_data.mat_proj.0[0][0] =
+            camera_data.mat_proj = mat4::identity();
+            camera_data.mat_proj.0[0][0] =
                 swapchain.extent.height as f32 / swapchain.extent.width as f32;
-            uniform_data.mat_proj.0[2][3] = 1.0;
-            uniform_data.mat_view_proj = uniform_data.mat_proj.dot(&uniform_data.mat_view);
+            camera_data.mat_proj.0[2][3] = 1.0;
+            camera_data.mat_view_proj = camera_data.mat_proj.dot(&camera_data.mat_view);
+
+            simulation_params.particle_count = PARTICLE_COUNT as u32;
+            simulation_params.rng_seed = (time_curr - time_start).subsec_nanos();
+            simulation_params.time_step = 1e-9 * nanos as f32;
+            simulation_params.init_ttl = 3.0;
+            simulation_params.init_pos = Vector([0.0, 0.0, 0.0, 1.0]);
+            simulation_params.init_vel = Vector([0.0, 15.0, 0.0, 2.5]);
+            simulation_params.acc = Vector([0.0, -10.0, 0.0, 0.0]);
 
             let cur_command_buffer = command_buffers[frame_in_flight_index];
-            let cur_uniform_mapping = uniform_mappings[frame_in_flight_index];
             let cur_fence = fences_in_flight[frame_in_flight_index].0;
             let cur_image_available = semaphores_image_available[frame_in_flight_index].0;
             let cur_render_finished = semaphores_render_finished[frame_in_flight_index].0;
-            let cur_descriptor_set_main = descriptor_sets_main[frame_in_flight_index];
+            // let cur_descriptor_set_main = descriptor_sets_main[frame_in_flight_index];
+            let cur_descriptor_set_simulation = descriptor_sets_simulation[frame_in_flight_index];
+            let cur_descriptor_set_particle = descriptor_sets_particle[frame_in_flight_index];
 
             ptr::copy(
-                mem::transmute::<*const UniformData, *const std::ffi::c_void>(
-                    &uniform_data as *const _,
+                mem::transmute::<*const CameraData, *const std::ffi::c_void>(
+                    &camera_data as *const _,
                 ),
-                cur_uniform_mapping,
-                uniform_data_size,
+                camera_mappings[frame_in_flight_index],
+                camera_data_size,
+            );
+            ptr::copy(
+                mem::transmute::<*const SimulationStepParams, *const std::ffi::c_void>(
+                    &simulation_params as *const _,
+                ),
+                simulation_params_mappings[frame_in_flight_index],
+                simulation_params_size,
             );
 
             vk.device
@@ -364,6 +420,26 @@ fn main() {
                 .cmd_set_viewport(cur_command_buffer, 0, &viewports);
             vk.device.cmd_set_scissor(cur_command_buffer, 0, &scissors);
 
+            vk.device.cmd_bind_pipeline(
+                cur_command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_simulate.pipeline.0,
+            );
+            vk.device.cmd_bind_descriptor_sets(
+                cur_command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_simulate.layout.0,
+                0,
+                &[cur_descriptor_set_simulation],
+                &[],
+            );
+            vk.device.cmd_dispatch(
+                cur_command_buffer,
+                ((PARTICLE_COUNT + 255) / 256) as _,
+                1,
+                1,
+            );
+
             let render_pass_begin = vk::RenderPassBeginInfo::default()
                 .render_pass(render_pass.0)
                 .framebuffer(swapchain.framebuffers[image_index as usize].0)
@@ -377,20 +453,20 @@ fn main() {
             vk.device.cmd_bind_pipeline(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline_main.pipeline.0,
+                pipeline_particle.pipeline.0,
             );
             vk.device.cmd_bind_descriptor_sets(
                 cur_command_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline_main.layout.0,
+                pipeline_particle.layout.0,
                 0,
-                slice::from_ref(&cur_descriptor_set_main),
+                &[cur_descriptor_set_particle],
                 &[],
             );
             vk.device.cmd_bind_vertex_buffers(
                 cur_command_buffer,
                 0,
-                &[vertex_buffer.buffer.0],
+                &[particles_buffer.buffer.0],
                 &[0],
             );
             vk.device.cmd_bind_index_buffer(
@@ -399,8 +475,14 @@ fn main() {
                 0,
                 vk::IndexType::UINT32,
             );
-            vk.device
-                .cmd_draw_indexed(cur_command_buffer, indices.len() as _, 1, 0, 0, 0);
+            vk.device.cmd_draw_indexed(
+                cur_command_buffer,
+                n_indices,
+                PARTICLE_COUNT as u32,
+                0,
+                0,
+                0,
+            );
 
             vk.device
                 .cmd_next_subpass(cur_command_buffer, vk::SubpassContents::INLINE);
@@ -414,7 +496,7 @@ fn main() {
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline_post_effect.layout.0,
                 0,
-                slice::from_ref(&descriptor_set_post_effect),
+                &[descriptor_set_post_effect],
                 &[],
             );
             vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);

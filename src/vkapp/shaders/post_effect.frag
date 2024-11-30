@@ -6,6 +6,6 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec4 sampled = texture(hdr_sampler, in_tex_coord);
-    sampled.xyz *= 0.01;
+    // sampled.xyz *= 0.01;
     out_color = sampled;
 }

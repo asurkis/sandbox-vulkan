@@ -2,8 +2,11 @@ fn main() {
     let shaders = [
         "main.vert",
         "main.frag",
+        "particle.vert",
+        "particle.frag",
         "post_effect.vert",
         "post_effect.frag",
+        "simulation.comp",
     ];
     let src_dir = std::env::current_dir()
         .unwrap()
