@@ -280,6 +280,14 @@ fn main() {
                     .build();
                 ui.slider("Turn speed", -360.0, 360.0, &mut state.turn_speed);
                 ui.slider("Angle", -180.0, 180.0, &mut state.angle_deg);
+                ui.spacing();
+                ui.slider("Particle lifetime", 0.0, 10.0, &mut state.init_ttl);
+                ui.input_float4("Particle initial position", &mut state.init_pos.0)
+                    .build();
+                ui.input_float4("Particle initial velocity", &mut state.init_vel.0)
+                    .build();
+                ui.input_float4("Particle acceleration", &mut state.accel.0)
+                    .build();
             });
 
             let time_elapsed = time_curr - time_prev;
@@ -327,10 +335,10 @@ fn main() {
             simulation_params.particle_count = PARTICLE_COUNT as u32;
             simulation_params.rng_seed = (time_curr - time_start).subsec_nanos();
             simulation_params.time_step = 1e-9 * nanos as f32;
-            simulation_params.init_ttl = 3.0;
-            simulation_params.init_pos = Vector([0.0, 0.0, 0.0, 1.0]);
-            simulation_params.init_vel = Vector([0.0, 15.0, 0.0, 2.5]);
-            simulation_params.acc = Vector([0.0, -10.0, 0.0, 0.0]);
+            simulation_params.init_ttl = state.init_ttl;
+            simulation_params.init_pos = state.init_pos;
+            simulation_params.init_vel = state.init_vel;
+            simulation_params.acc = state.accel;
 
             let cur_command_buffer = command_buffers[frame_in_flight_index];
             let cur_fence = fences_in_flight[frame_in_flight_index].0;

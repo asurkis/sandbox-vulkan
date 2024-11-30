@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::math::{vec2, vec3, Vector};
+use crate::math::{vec2, vec3, vec4, Vector};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -15,6 +15,11 @@ pub struct State {
     pub orbit_distance: vec2,
     pub angle_deg: f32,
     pub turn_speed: f32,
+
+    pub init_ttl: f32,
+    pub init_pos: vec4,
+    pub init_vel: vec4,
+    pub accel: vec4,
 }
 
 #[derive(Debug)]
@@ -30,6 +35,11 @@ impl Default for State {
             orbit_distance: Vector([1.0; 2]),
             angle_deg: 0.0,
             turn_speed: 0.0,
+
+            init_ttl: 0.0,
+            init_pos: Vector([0.0; 4]),
+            init_vel: Vector([0.0; 4]),
+            accel: Vector([0.0; 4]),
         }
     }
 }
