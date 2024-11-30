@@ -1,9 +1,9 @@
 use crate::{
-    vklib::{CommittedBuffer, VkContext},
+    vklib::{vkbox, CommittedBuffer, CommittedImage, VkContext},
     CameraData, SimulationStepParams, MAX_CONCURRENT_FRAMES,
 };
 use ash::vk;
-use std::slice;
+use std::{array, slice};
 
 pub unsafe fn create_descriptor_sets_simulation(
     vk: &VkContext,
@@ -75,34 +75,39 @@ pub unsafe fn create_descriptor_sets_main(
     sets
 }
 
-pub unsafe fn create_descriptor_set_post_effect(
+pub unsafe fn create_descriptor_sets_filter(
     vk: &VkContext,
     descriptor_pool: vk::DescriptorPool,
     layout: vk::DescriptorSetLayout,
-) -> vk::DescriptorSet {
+) -> Vec<vk::DescriptorSet> {
+    let set_layouts = [layout; 2];
     let allocate_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
-        .set_layouts(slice::from_ref(&layout));
-    vk.device.allocate_descriptor_sets(&allocate_info).unwrap()[0]
+        .set_layouts(&set_layouts);
+    vk.device.allocate_descriptor_sets(&allocate_info).unwrap()
 }
 
-pub unsafe fn update_descriptor_set_post_effect(
+pub unsafe fn update_descriptor_sets_filter(
     vk: &VkContext,
-    descriptor_set: vk::DescriptorSet,
+    descriptor_set: &[vk::DescriptorSet],
     sampler: vk::Sampler,
-    image_view: vk::ImageView,
+    hdr_buffers: &[CommittedImage; 2],
 ) {
-    let image_info = [vk::DescriptorImageInfo {
-        sampler,
-        image_view,
-        image_layout: vk::ImageLayout::GENERAL,
-    }];
-    let descriptor_writes = [vk::WriteDescriptorSet::default()
-        .dst_set(descriptor_set)
-        .dst_binding(1)
-        .dst_array_element(0)
-        .descriptor_count(1)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .image_info(&image_info)];
+    let image_info: [_; 2] = array::from_fn(|i| {
+        [vk::DescriptorImageInfo {
+            sampler,
+            image_view: hdr_buffers[i].view.0,
+            image_layout: vk::ImageLayout::GENERAL,
+        }]
+    });
+    let descriptor_writes: [_; 2] = array::from_fn(|i| {
+        vk::WriteDescriptorSet::default()
+            .dst_set(descriptor_set[i])
+            .dst_binding(1)
+            .dst_array_element(0)
+            .descriptor_count(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .image_info(&image_info[i])
+    });
     vk.device.update_descriptor_sets(&descriptor_writes, &[]);
 }

@@ -16,12 +16,12 @@ pub unsafe fn create_descriptor_pool(vk: &VkContext) -> vkbox::DescriptorPool {
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
+            descriptor_count: 2,
         },
     ];
     let create_info = vk::DescriptorPoolCreateInfo::default()
         .flags(vk::DescriptorPoolCreateFlags::empty())
-        .max_sets(1 + 2 * MAX_CONCURRENT_FRAMES as u32)
+        .max_sets(2 + 2 * MAX_CONCURRENT_FRAMES as u32)
         .pool_sizes(&pool_sizes);
     vkbox::DescriptorPool::new(vk, &create_info)
 }

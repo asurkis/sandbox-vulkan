@@ -20,10 +20,13 @@ pub struct State {
     pub turn_speed: f32,
 
     pub particle_count: u32,
+    pub time_scale: f32,
     pub init_ttl: f32,
     pub init_pos: vec4,
     pub init_vel: vec4,
     pub accel: vec4,
+
+    pub blur_radius: u32,
 }
 
 #[derive(Debug)]
@@ -41,10 +44,13 @@ impl Default for State {
             turn_speed: 0.0,
 
             particle_count: MAX_PARTICLE_COUNT as _,
+            time_scale: 1.0,
             init_ttl: 0.0,
             init_pos: Vector([0.0; 4]),
             init_vel: Vector([0.0; 4]),
             accel: Vector([0.0; 4]),
+
+            blur_radius: 0,
         }
     }
 }

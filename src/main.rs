@@ -10,9 +10,9 @@ use sdl2::event::Event;
 use state::StateBox;
 use std::{mem, ptr, slice, time};
 use vkapp::{
-    create_descriptor_pool, create_descriptor_set_post_effect, create_descriptor_sets_main,
-    create_descriptor_sets_simulation, create_render_pass, update_descriptor_set_post_effect,
-    PipelineBox, Swapchain,
+    create_descriptor_pool, create_descriptor_sets_filter, create_descriptor_sets_main,
+    create_descriptor_sets_simulation, create_render_pass, update_descriptor_sets_filter,
+    PipelineBox, PipelineVec, Swapchain,
 };
 use vklib::{CommittedBuffer, SdlContext, VkContext};
 
@@ -101,7 +101,7 @@ fn main() {
         let pipeline_simulate = PipelineBox::new_simulation(&vk);
         // let pipeline_main = PipelineBox::new_main(&vk, render_pass.0, msaa_sample_count);
         let pipeline_particle = PipelineBox::new_particle(&vk, render_pass.0, msaa_sample_count);
-        let pipeline_post_effect = PipelineBox::new_post_effect(&vk, render_pass.0);
+        let pipeline_filter = PipelineVec::new_filters(&vk, render_pass.0);
 
         let mut imgui = imgui::Context::create();
         // imgui.set_ini_filename(None);
@@ -118,7 +118,7 @@ fn main() {
                 in_flight_frames: MAX_CONCURRENT_FRAMES,
                 enable_depth_test: false,
                 enable_depth_write: false,
-                subpass: 1,
+                subpass: 4,
                 sample_count: vk::SampleCountFlags::TYPE_1,
             }),
         )
@@ -221,18 +221,18 @@ fn main() {
             pipeline_particle.descriptor_set_layout.0,
             &camera_buffers,
         );
-        let descriptor_set_post_effect = create_descriptor_set_post_effect(
+        let descriptor_sets_filter = create_descriptor_sets_filter(
             &vk,
             descriptor_pool.0,
-            pipeline_post_effect.descriptor_set_layout.0,
+            pipeline_filter.descriptor_set_layout.0,
         );
 
         let sampler = vk.create_sampler();
-        update_descriptor_set_post_effect(
+        update_descriptor_sets_filter(
             &vk,
-            descriptor_set_post_effect,
+            &descriptor_sets_filter,
             sampler.0,
-            swapchain.hdr_buffer.view.0,
+            &swapchain.hdr_buffers,
         );
 
         let mut frame_in_flight_index = 0;
@@ -257,11 +257,11 @@ fn main() {
                         ..
                     } => {
                         swapchain.reinit();
-                        update_descriptor_set_post_effect(
+                        update_descriptor_sets_filter(
                             &vk,
-                            descriptor_set_post_effect,
+                            &descriptor_sets_filter,
                             sampler.0,
-                            swapchain.hdr_buffer.view.0,
+                            &swapchain.hdr_buffers,
                         );
                         continue 'main_loop;
                     }
@@ -280,20 +280,27 @@ fn main() {
                     .build();
                 ui.slider("Turn speed", -360.0, 360.0, &mut state.turn_speed);
                 ui.slider("Angle", -180.0, 180.0, &mut state.angle_deg);
+
                 ui.spacing();
+
                 ui.slider(
                     "Particle count",
                     0,
                     MAX_PARTICLE_COUNT as u32,
                     &mut state.particle_count,
                 );
-                ui.slider("Particle lifetime", 0.0, 10.0, &mut state.init_ttl);
+                ui.slider("Time scale", 0.0, 3.0, &mut state.time_scale);
+                ui.slider("Particle lifetime", 0.0, 6.0, &mut state.init_ttl);
                 ui.input_float4("Particle initial position", &mut state.init_pos.0)
                     .build();
                 ui.input_float4("Particle initial velocity", &mut state.init_vel.0)
                     .build();
                 ui.input_float4("Particle acceleration", &mut state.accel.0)
                     .build();
+
+                ui.spacing();
+
+                ui.slider("Blur radius", 0, 128, &mut state.blur_radius);
             });
 
             let time_elapsed = time_curr - time_prev;
@@ -340,7 +347,7 @@ fn main() {
 
             simulation_params.particle_count = state.particle_count;
             simulation_params.rng_seed = (time_curr - time_start).subsec_nanos();
-            simulation_params.time_step = 1e-9 * nanos as f32;
+            simulation_params.time_step = 1e-9 * nanos as f32 * state.time_scale;
             simulation_params.init_ttl = state.init_ttl;
             simulation_params.init_pos = state.init_pos;
             simulation_params.init_vel = state.init_vel;
@@ -382,11 +389,11 @@ fn main() {
                 Ok((image_index, false)) => image_index,
                 Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
-                    update_descriptor_set_post_effect(
+                    update_descriptor_sets_filter(
                         &vk,
-                        descriptor_set_post_effect,
+                        &descriptor_sets_filter,
                         sampler.0,
-                        swapchain.hdr_buffer.view.0,
+                        &swapchain.hdr_buffers,
                     );
                     continue 'main_loop;
                 }
@@ -414,6 +421,7 @@ fn main() {
                         float32: [0.0; 4],
                     },
                 },
+                vk::ClearValue::default(),
                 vk::ClearValue {
                     color: vk::ClearColorValue {
                         // float32: [1.0, 0.75, 0.5, 0.0],
@@ -494,22 +502,40 @@ fn main() {
                 0,
             );
 
-            vk.device
-                .cmd_next_subpass(cur_command_buffer, vk::SubpassContents::INLINE);
-            vk.device.cmd_bind_pipeline(
-                cur_command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_post_effect.pipeline.0,
-            );
-            vk.device.cmd_bind_descriptor_sets(
-                cur_command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_post_effect.layout.0,
-                0,
-                &[descriptor_set_post_effect],
-                &[],
-            );
-            vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
+            for i_filter in 0..4 {
+                vk.device
+                    .cmd_next_subpass(cur_command_buffer, vk::SubpassContents::INLINE);
+                vk.device.cmd_bind_pipeline(
+                    cur_command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_filter.pipelines[i_filter].0,
+                );
+                vk.device.cmd_bind_descriptor_sets(
+                    cur_command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_filter.layout.0,
+                    0,
+                    &[descriptor_sets_filter[i_filter % 2]],
+                    &[],
+                );
+                let push_constants = [
+                    Vector([
+                        swapchain.extent.width as f32,
+                        swapchain.extent.height as f32,
+                        1.0 / swapchain.extent.width as f32,
+                        1.0 / swapchain.extent.height as f32,
+                    ]),
+                    Vector([state.blur_radius as f32, state.blur_radius as f32, 0.0, 0.0]),
+                ];
+                vk.device.cmd_push_constants(
+                    cur_command_buffer,
+                    pipeline_filter.layout.0,
+                    vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    push_constants.align_to().1,
+                );
+                vk.device.cmd_draw(cur_command_buffer, 3, 1, 0, 0);
+            }
 
             imgui_renderer
                 .cmd_draw(cur_command_buffer, imgui.render())
@@ -540,11 +566,11 @@ fn main() {
                 Ok(false) => {}
                 Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     swapchain.reinit();
-                    update_descriptor_set_post_effect(
+                    update_descriptor_sets_filter(
                         &vk,
-                        descriptor_set_post_effect,
+                        &descriptor_sets_filter,
                         sampler.0,
-                        swapchain.hdr_buffer.view.0,
+                        &swapchain.hdr_buffers,
                     );
                 }
                 Err(err) => panic!("Unexpected Vulkan error: {err}"),

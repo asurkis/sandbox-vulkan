@@ -1,10 +1,10 @@
 use crate::vklib::{vkbox, CommittedImage, TransientGraphicsCommandBuffer, VkContext};
 use ash::vk;
-use std::{mem, ptr};
+use std::{array, mem, ptr};
 
 pub struct Swapchain<'a> {
     pub framebuffers: Vec<vkbox::Framebuffer<'a>>,
-    pub hdr_buffer: CommittedImage<'a>,
+    pub hdr_buffers: [CommittedImage<'a>; 2],
     _msaa_buffer: CommittedImage<'a>,
     _depth_buffer: CommittedImage<'a>,
     _image_views: Vec<vkbox::ImageView<'a>>,
@@ -65,20 +65,23 @@ impl<'a> Swapchain<'a> {
         } else {
             CommittedImage::default()
         };
-        let hdr_buffer = CommittedImage::new(
-            vk,
-            hdr_buffer_format,
-            create_info.image_extent,
-            1,
-            vk::SampleCountFlags::TYPE_1,
-            vk::ImageUsageFlags::SAMPLED
-                | if msaa_on {
-                    vk::ImageUsageFlags::TRANSFER_DST
-                } else {
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT
-                },
-            vk::ImageAspectFlags::COLOR,
-        );
+        let hdr_buffers = array::from_fn(|i| {
+            CommittedImage::new(
+                vk,
+                hdr_buffer_format,
+                create_info.image_extent,
+                1,
+                vk::SampleCountFlags::TYPE_1,
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | if i == 0 && msaa_on {
+                        vk::ImageUsageFlags::TRANSFER_DST
+                    } else {
+                        vk::ImageUsageFlags::empty()
+                    },
+                vk::ImageAspectFlags::COLOR,
+            )
+        });
         let depth_buffer_on = depth_buffer_format != vk::Format::UNDEFINED;
         let depth_buffer = if depth_buffer_on {
             vk.create_depth_buffer(
@@ -94,7 +97,12 @@ impl<'a> Swapchain<'a> {
         let framebuffers: Vec<_> = image_views
             .iter()
             .map(|iv| {
-                let mut attachments = vec![iv.0, depth_buffer.view.0, hdr_buffer.view.0];
+                let mut attachments = vec![
+                    iv.0,
+                    depth_buffer.view.0,
+                    hdr_buffers[0].view.0,
+                    hdr_buffers[1].view.0,
+                ];
                 if msaa_on {
                     attachments.push(msaa_buffer.view.0);
                 }
@@ -111,21 +119,23 @@ impl<'a> Swapchain<'a> {
 
         {
             let command_buffer = TransientGraphicsCommandBuffer::begin(vk, command_pool);
-            let image_memory_barriers = [vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::TRANSFER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(hdr_buffer.image.0)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })];
+            let image_memory_barriers: [_; 2] = array::from_fn(|i| {
+                vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(hdr_buffers[i].image.0)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+            });
             vk.device.cmd_pipeline_barrier(
                 command_buffer.buffer,
                 vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -139,7 +149,7 @@ impl<'a> Swapchain<'a> {
 
         Self {
             framebuffers,
-            hdr_buffer,
+            hdr_buffers,
             _msaa_buffer: msaa_buffer,
             _depth_buffer: depth_buffer,
             _image_views: image_views,

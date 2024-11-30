@@ -4,8 +4,11 @@ fn main() {
         "main.frag",
         "particle.vert",
         "particle.frag",
-        "post_effect.vert",
-        "post_effect.frag",
+        "filter.vert",
+        "filter0.frag",
+        "filter1.frag",
+        "filter2.frag",
+        "filter3.frag",
         "simulation.comp",
     ];
     let src_dir = std::env::current_dir()
